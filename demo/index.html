@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Halation Demo</title>
+<style>
+  :root {
+    --bg: #f4f3f1; --panel: #ffffff; --ink: #1d1c1a; --muted: #6b6862; --line: #dedbd6; --accent: #c4521d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161514; --panel: #201f1d; --ink: #ecebe8; --muted: #9c9891; --line: #34322f; --accent: #ff7a3d; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.4 -apple-system, system-ui, sans-serif; }
+  header { padding: 14px 16px; border-bottom: 1px solid var(--line); display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+  header h1 { font-size: 17px; margin: 0; }
+  header span { color: var(--muted); }
+  main { display: grid; grid-template-columns: 300px 1fr; min-height: calc(100vh - 50px); }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; } }
+  aside { background: var(--panel); border-right: 1px solid var(--line); padding: 14px 16px; display: flex; flex-direction: column; gap: 14px; }
+  label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  button, select { font: inherit; padding: 5px 9px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); cursor: pointer; }
+  button.on { border-color: var(--accent); color: var(--accent); }
+  .val { font-variant-numeric: tabular-nums; color: var(--ink); }
+  #stage { overflow: auto; padding: 16px; }
+  canvas { display: block; image-rendering: pixelated; background: #000; }
+  #status { color: var(--muted); font-size: 12px; min-height: 16px; }
+  fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 0; }
+  legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Halation — демо ядра</h1>
+  <span>то же ядро, что в плагине; расчёт в линейной гамме, 8-бит sRGB</span>
+</header>
+<main>
+  <aside>
+    <div>
+      <label>Картинка</label>
+      <input type="file" id="file" accept="image/*">
+      <div class="row" style="margin-top:8px">
+        <button data-scene="square">Квадрат 230</button>
+        <button data-scene="lamps">Лампы</button>
+        <button data-scene="gradient">Тёмный градиент</button>
+        <button data-scene="lattice">Решётка</button>
+      </div>
+    </div>
+    <fieldset>
+      <legend>Режим</legend>
+      <div class="row">
+        <label style="margin:0"><input type="radio" name="mode" value="srgb" checked> sRGB</label>
+        <label style="margin:0"><input type="radio" name="mode" value="curve"> Своя кривая</label>
+      </div>
+      <div id="curveBox" style="margin-top:8px; display:none">
+        <label>Источники ярче белого (скачок 254→255): <span class="val" id="jumpVal">×1</span></label>
+        <input type="range" id="jump" min="0" max="100" value="0">
+      </div>
+    </fieldset>
+    <div>
+      <label>Цвет свечения</label>
+      <input type="color" id="color" value="#ff9027">
+    </div>
+    <div>
+      <label>Размытие: <span class="val" id="blurVal">×1.00</span></label>
+      <input type="range" id="blur" min="0" max="100" value="50">
+    </div>
+    <div>
+      <label>Сила: <span class="val" id="strengthVal">30</span></label>
+      <input type="range" id="strength" min="0" max="100" value="30">
+    </div>
+    <fieldset>
+      <legend>Модель (сравнение)</legend>
+      <div class="row">
+        <label style="margin:0"><input type="radio" name="model" value="excess" checked> Только избыток (новая)</label>
+        <label style="margin:0"><input type="radio" name="model" value="normalized"> Нормировка (старая, с каймой)</label>
+      </div>
+    </fieldset>
+    <fieldset>
+      <legend>Радиусы каналов (сравнение, раздел 5.3)</legend>
+      <div class="row">
+        <label style="margin:0"><input type="radio" name="radii" value="1,1,1" checked> 1 / 1 / 1</label>
+        <label style="margin:0"><input type="radio" name="radii" value="1,0.55,0.35"> 1 / 0.55 / 0.35</label>
+      </div>
+    </fieldset>
+    <div>
+      <label>Вид</label>
+      <div class="row" id="views">
+        <button data-view="before">До</button>
+        <button data-view="after" class="on">После</button>
+        <button data-view="diff">Разница ×8</button>
+      </div>
+    </div>
+    <div>
+      <label>Масштаб</label>
+      <select id="zoom">
+        <option value="0.25">25 %</option><option value="0.5">50 %</option>
+        <option value="1" selected>100 %</option><option value="2">200 %</option>
+        <option value="4">400 %</option><option value="8">800 %</option>
+      </select>
+    </div>
+    <div id="status"></div>
+  </aside>
+  <section id="stage"><canvas id="canvas"></canvas></section>
+</main>
+<script src="../build/halation-core.js"></script>
+<script>
+(function () {
+  const core = window.HalationCore;
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const status = document.getElementById('status');
+  let src = null; // { w, h, data: Uint8ClampedArray RGBA }
+  let out = null;
+  let view = 'after';
+  let timer = 0;
+
+  function $(id) { return document.getElementById(id); }
+
+  function jumpCurve(k) {
+    const pts = core.defaultCurvePoints().map(([x, y]) => [x, y / k]);
+    pts.push([254, core._internal.transfer.srgbToLinear(254 / 255) / k]);
+    return pts;
+  }
+
+  function settings() {
+    const hex = $('color').value;
+    const color = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+    const mode = document.querySelector('input[name=mode]:checked').value;
+    const k = Math.round(Math.pow(100, $('jump').value / 100));
+    const s = {
+      model: document.querySelector('input[name=model]:checked').value,
+      mode,
+      color,
+      blur: +$('blur').value,
+      strength: +$('strength').value,
+      radii: document.querySelector('input[name=radii]:checked').value.split(',').map(Number),
+    };
+    if (mode === 'curve') s.curvePoints = k > 1 ? jumpCurve(k) : core.defaultCurvePoints();
+    return s;
+  }
+
+  function labels() {
+    $('blurVal').textContent = '×' + core.blurMultiplier(+$('blur').value).toFixed(2);
+    $('strengthVal').textContent = $('strength').value;
+    $('jumpVal').textContent = '×' + Math.round(Math.pow(100, $('jump').value / 100));
+    $('curveBox').style.display = document.querySelector('input[name=mode]:checked').value === 'curve' ? 'block' : 'none';
+  }
+
+  function run() {
+    if (!src) return;
+    const t0 = performance.now();
+    const rgba = new Uint8Array(src.data.buffer.slice(0));
+    out = core.processImage(rgba, src.w, src.h, 4, settings());
+    status.textContent = `${src.w}×${src.h}: ${(performance.now() - t0).toFixed(0)} мс (в браузере с JIT)`;
+    draw();
+  }
+
+  function draw() {
+    if (!src) return;
+    canvas.width = src.w;
+    canvas.height = src.h;
+    const img = ctx.createImageData(src.w, src.h);
+    if (view === 'before' || !out) img.data.set(src.data);
+    else if (view === 'after') img.data.set(out);
+    else {
+      for (let i = 0; i < out.length; i += 4) {
+        for (let c = 0; c < 3; c++) img.data[i + c] = Math.min(255, 128 + 8 * (out[i + c] - src.data[i + c]));
+        img.data[i + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    const z = +$('zoom').value;
+    canvas.style.width = src.w * z + 'px';
+    canvas.style.height = src.h * z + 'px';
+  }
+
+  function schedule() {
+    labels();
+    clearTimeout(timer);
+    timer = setTimeout(run, 120);
+  }
+
+  function setSource(w, h, data) {
+    src = { w, h, data };
+    out = null;
+    run();
+  }
+
+  function scene(name) {
+    const w = 800;
+    const h = 500;
+    const d = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < w * h; i++) d[i * 4 + 3] = 255;
+    const px = (x, y, r, g, b) => { const p = (y * w + x) * 4; d[p] = r; d[p + 1] = g; d[p + 2] = b; };
+    if (name === 'square') {
+      for (let y = 150; y < 350; y++) for (let x = 300; x < 500; x++) px(x, y, 230, 230, 230);
+    } else if (name === 'lamps') {
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) px(x, y, 18, 16, 22);
+      const lamps = [[100, 100, 1], [250, 120, 2], [420, 90, 4], [600, 140, 8], [150, 330, 3], [400, 360, 12], [650, 380, 5]];
+      for (const [cx, cy, r] of lamps) {
+        for (let y = -r; y <= r; y++) for (let x = -r; x <= r; x++) if (x * x + y * y <= r * r) px(cx + x, cy + y, 255, 255, 255);
+      }
+      for (let y = 220; y < 280; y++) for (let x = 40; x < 760; x++) px(x, y, 255, 40, 30); // saturated red: R=255 is a source too
+    } else if (name === 'lattice') {
+      // dark concrete with cross-shaped openings, like a screen-block wall lit from behind
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) px(x, y, 34, 36, 33);
+      const rect = (x0, y0, x1, y1) => { for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) px(x, y, 255, 255, 255); };
+      for (let gy = 0; gy < 3; gy++) {
+        for (let gx = 0; gx < 6; gx++) {
+          const cx = 70 + gx * 130;
+          const cy = 90 + gy * 150;
+          rect(cx - 5, cy - 34, cx + 5, cy + 34);
+          rect(cx - 34, cy - 5, cx + 34, cy + 5);
+          for (const [dx, dy] of [[-20, -20], [20, -20], [-20, 20], [20, 20]]) rect(cx + dx - 6, cy + dy - 6, cx + dx + 6, cy + dy + 6);
+        }
+      }
+    } else {
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const v = Math.round((x / (w - 1)) * 40); px(x, y, v, v, v); }
+      for (let y = 230; y < 270; y++) for (let x = 360; x < 440; x++) px(x, y, 255, 255, 255);
+    }
+    setSource(w, h, d);
+  }
+
+  $('file').addEventListener('change', async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    const bmp = await createImageBitmap(f, { colorSpaceConversion: 'none' });
+    const c = document.createElement('canvas');
+    c.width = bmp.width;
+    c.height = bmp.height;
+    const cx = c.getContext('2d');
+    cx.drawImage(bmp, 0, 0);
+    setSource(bmp.width, bmp.height, cx.getImageData(0, 0, bmp.width, bmp.height).data);
+  });
+  document.querySelectorAll('[data-scene]').forEach((b) => b.addEventListener('click', () => scene(b.dataset.scene)));
+  document.querySelectorAll('[data-view]').forEach((b) => b.addEventListener('click', () => {
+    view = b.dataset.view;
+    document.querySelectorAll('[data-view]').forEach((x) => x.classList.toggle('on', x === b));
+    draw();
+  }));
+  ['blur', 'strength', 'jump', 'color'].forEach((id) => $(id).addEventListener('input', schedule));
+  document.querySelectorAll('input[name=mode], input[name=radii], input[name=model]').forEach((r) => r.addEventListener('change', schedule));
+  $('zoom').addEventListener('change', draw);
+  labels();
+  scene('lamps');
+})();
+</script>
+</body>
+</html>

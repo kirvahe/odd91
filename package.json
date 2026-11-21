@@ -1,0 +1,18 @@
+{
+  "name": "halation-ps-plugin",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Physically based film halation for Photoshop (UXP, pure JavaScript)",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test \"test/**/*.test.js\"",
+    "bundle": "node tools/bundle-core.mjs",
+    "bluenoise": "node tools/gen-bluenoise.mjs",
+    "bench": "node --jitless tools/bench.mjs",
+    "build": "node tools/build-ccx.mjs",
+    "icons": "node tools/gen-icons.mjs"
+  },
+  "engines": {
+    "node": ">=21"
+  }
+}

@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Halation</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="theme-dark">
+  <div id="app" class="app">
+
+    <div id="fatal" class="message message-error is-hidden"></div>
+
+    <!-- Режим перевода в линейную гамму -->
+    <div class="row">
+      <sp-label class="row-label">Режим:</sp-label>
+      <sp-radio-group id="mode-group" name="mode">
+        <sp-radio value="srgb" checked>sRGB</sp-radio>
+        <sp-radio value="curve">Своя кривая</sp-radio>
+      </sp-radio-group>
+    </div>
+
+    <!-- Редактор кривой: только в режиме «Своя кривая» -->
+    <div id="curve-section" class="section is-hidden">
+      <div class="curve-row">
+        <div id="curve-y-labels" class="y-labels"></div>
+        <div id="curve-canvas-wrap" class="canvas-wrap">
+          <canvas id="curve-canvas" width="240" height="170"></canvas>
+        </div>
+      </div>
+      <div class="curve-row">
+        <div class="y-labels-spacer"></div>
+        <div id="curve-x-labels" class="x-labels"></div>
+      </div>
+      <sp-detail class="hint">Щелчок — добавить точку, перетаскивание — сдвинуть, двойной щелчок — удалить. По X — код 0–255, по Y — линейный свет.</sp-detail>
+      <div class="row">
+        <sp-label class="field-label">Точка: X</sp-label>
+        <sp-textfield id="point-x" class="field field-x" placeholder="—" disabled></sp-textfield>
+        <sp-label class="field-label">Y</sp-label>
+        <sp-textfield id="point-y" class="field field-y" placeholder="—" disabled></sp-textfield>
+      </div>
+      <div class="row">
+        <sp-label class="row-label">Ось Y:</sp-label>
+        <sp-radio-group id="axis-group" name="axis">
+          <sp-radio value="linear" checked>лин</sp-radio>
+          <sp-radio value="log">лог</sp-radio>
+        </sp-radio-group>
+      </div>
+      <div class="row">
+        <sp-label class="field-label">k</sp-label>
+        <sp-textfield id="k-field" class="field field-k" value="0.5"></sp-textfield>
+        <sp-action-button id="btn-multiply" title="Умножить все внутренние точки на k">×k</sp-action-button>
+        <sp-action-button id="btn-curve-reset" title="Вернуть кривую sRGB">Сброс</sp-action-button>
+      </div>
+      <div id="curve-message" class="message message-warn is-hidden"></div>
+    </div>
+
+    <!-- Цвет свечения -->
+    <div class="section">
+      <div class="row">
+        <sp-label class="row-label">Цвет свечения:</sp-label>
+        <div id="color-swatch" class="swatch" title="Выбрать цвет в палитре Photoshop"></div>
+        <sp-detail id="color-hex" class="color-hex">#FF9027</sp-detail>
+      </div>
+      <div class="row">
+        <sp-action-button id="btn-pick-color">Палитра…</sp-action-button>
+        <sp-action-button id="btn-color-manual">Вручную ▸</sp-action-button>
+      </div>
+      <div id="color-manual" class="subsection is-hidden">
+        <div class="slider-row">
+          <sp-label class="slider-label">Оттенок</sp-label>
+          <sp-slider id="hue-slider" class="slider" min="0" max="360" value="30" show-value="false"></sp-slider>
+          <span id="hue-value" class="slider-value">30°</span>
+        </div>
+        <div class="slider-row">
+          <sp-label class="slider-label">Насыщ.</sp-label>
+          <sp-slider id="sat-slider" class="slider" min="0" max="100" value="85" show-value="false"></sp-slider>
+          <span id="sat-value" class="slider-value">85</span>
+        </div>
+        <div class="slider-row">
+          <sp-label class="slider-label">Яркость</sp-label>
+          <sp-slider id="val-slider" class="slider" min="0" max="100" value="100" show-value="false"></sp-slider>
+          <span id="val-value" class="slider-value">100</span>
+        </div>
+        <div id="color-presets" class="presets"></div>
+      </div>
+      <div id="color-message" class="message message-warn is-hidden"></div>
+    </div>
+
+    <!-- Размытие и сила -->
+    <div class="section">
+      <div class="slider-row">
+        <sp-label class="slider-label">Размытие</sp-label>
+        <sp-slider id="blur-slider" class="slider" min="0" max="100" value="50" show-value="false"></sp-slider>
+        <span id="blur-value" class="slider-value">×1.00</span>
+      </div>
+      <div class="slider-row">
+        <sp-label class="slider-label">Сила</sp-label>
+        <sp-slider id="strength-slider" class="slider" min="0" max="100" value="30" show-value="false"></sp-slider>
+        <span id="strength-value" class="slider-value">30</span>
+      </div>
+    </div>
+
+    <!-- Предпросмотр -->
+    <div class="section">
+      <div id="preview-wrap" class="preview-wrap">
+        <img id="preview-img" class="preview-img is-hidden" alt="Предпросмотр">
+        <div id="preview-placeholder" class="preview-placeholder">Предпросмотр появится после открытия документа</div>
+      </div>
+      <sp-detail id="preview-progress" class="hint progress is-hidden">Готовлю предпросмотр…</sp-detail>
+      <sp-detail id="preview-source" class="hint"></sp-detail>
+      <div class="row">
+        <sp-radio-group id="view-group" name="view">
+          <sp-radio value="before">До</sp-radio>
+          <sp-radio value="after" checked>После</sp-radio>
+          <sp-radio value="halo">Только ореол</sp-radio>
+        </sp-radio-group>
+      </div>
+      <sp-detail id="halo-caption" class="hint is-hidden">Весь рассеянный свет, включая возвращённый в ту же точку</sp-detail>
+      <div class="row">
+        <sp-action-button id="btn-refresh">Обновить</sp-action-button>
+        <sp-detail id="preview-stale" class="stale is-hidden">(устарел)</sp-detail>
+      </div>
+    </div>
+
+    <!-- Применение -->
+    <div class="section">
+      <sp-checkbox id="replace-checkbox" checked>Заменять прежний результат</sp-checkbox>
+      <div class="row row-center">
+        <sp-button id="btn-apply" variant="cta">Применить</sp-button>
+      </div>
+      <div id="status" class="message is-hidden"></div>
+      <div id="confirm-box" class="confirm is-hidden">
+        <div id="confirm-text" class="confirm-text"></div>
+        <div class="confirm-buttons">
+          <sp-button id="confirm-layer" variant="cta">Применить к слою</sp-button>
+          <sp-button id="confirm-composite" variant="secondary">К видимому изображению</sp-button>
+          <sp-button id="confirm-cancel" variant="secondary" quiet>Отмена</sp-button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Диагностика -->
+    <div class="section">
+      <sp-action-button id="diag-toggle" quiet>▸ Диагностика</sp-action-button>
+      <div id="diag-block" class="subsection is-hidden">
+        <div class="row">
+          <sp-button id="btn-copy-report" variant="secondary">Скопировать отчёт</sp-button>
+        </div>
+        <sp-detail id="copy-message" class="hint is-hidden"></sp-detail>
+        <textarea id="diag-text" class="diag-text" readonly></textarea>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Ядро (собирается tools/bundle-core.mjs, копируется сборкой), затем панель -->
+  <script src="halation-core.js"></script>
+  <script src="color-utils.js"></script>
+  <script src="settings-store.js"></script>
+  <script src="curve-editor.js"></script>
+  <script src="diagnostics.js"></script>
+  <script src="ps-bridge.js"></script>
+  <script src="panel.js"></script>
+</body>
+</html>
