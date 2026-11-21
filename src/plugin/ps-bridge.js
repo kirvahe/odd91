@@ -788,7 +788,9 @@
           documentID: docId,
           layerID: layerId,
           imageData: img,
-          replace: true,
+          // false: strips are added to the new layer one by one. With true (the API default)
+          // Photoshop discards the layer's existing pixels, so only the last strip would remain.
+          replace: false,
           targetBounds: { left: left, top: top },
           commandName: COMMAND_NAME
         });

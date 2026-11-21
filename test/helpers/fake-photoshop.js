@@ -272,7 +272,10 @@ function createFakePhotoshop(opts = {}) {
       if (img._disposed) throw new Error("putPixels: imageData already disposed");
       const data = await img.getData();
       const tb = o.targetBounds || { left: 0, top: 0 };
-      log.putPixels.push({ layerID: o.layerID, targetBounds: { ...tb }, width: img.width, height: img.height, components: img.components, colorProfile: img.colorProfile });
+      log.putPixels.push({ layerID: o.layerID, targetBounds: { ...tb }, width: img.width, height: img.height, components: img.components, colorProfile: img.colorProfile, replace: o.replace });
+      // Adobe imaging.md: "If true, then existing pixels in the layer are discarded before adding
+      // new pixels." The default is true.
+      if (o.replace !== false) l._store.fill(0);
       for (let y = 0; y < img.height; y++) {
         for (let x = 0; x < img.width; x++) {
           const dx = tb.left + x, dy = tb.top + y;
