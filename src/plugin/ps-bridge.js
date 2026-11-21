@@ -54,17 +54,39 @@
     return String(err.message || err);
   }
 
+  // Narrow on purpose (review М2): the reliable signal is executionContext.isCancelled,
+  // which apply/buildPreview turn into the halationCancelled flag. Text is a fallback
+  // and only matches messages that say the user cancelled.
+  var CANCEL_TEXT = /cancel(?:l)?ed by (?:the )?user|user cancel|отменено пользователем/i;
+  // "host is in a modal state", "... is currently in modal state", "is busy". Not
+  // "requires a modal scope" / "only allowed from inside a modal scope" (a plugin bug).
+  var BUSY_TEXT = /modal state|is busy|занят/i;
+
   function isCancelError(err) {
     if (!err) return false;
     if (err.halationCancelled) return true;
-    if (err.name === "AbortError") return true;
     if (err.number === -128 || err.code === -128) return true;
-    return /cancel|отмен/i.test(errorText(err));
+    return CANCEL_TEXT.test(errorText(err));
   }
 
   function isModalBusyError(err) {
     if (!err || isCancelError(err)) return false;
-    return /modal|busy|занят/i.test(errorText(err));
+    var t = errorText(err);
+    return BUSY_TEXT.test(t) && !/modal scope/i.test(t);
+  }
+
+  /** Set a flag on err; when err cannot carry it, wrap it in a new Error that does. */
+  function flagError(err, flag, fallbackMessage) {
+    if (err && typeof err === "object") {
+      try {
+        err[flag] = true;
+        if (err[flag] === true) return err;
+      } catch (e) { /* frozen */ }
+    }
+    var wrapped = new Error(fallbackMessage || errorText(err));
+    wrapped[flag] = true;
+    wrapped.cause = err;
+    return wrapped;
   }
 
   /** Russian, user-facing description of an error thrown by apply / buildPreview / pickColor. */
@@ -276,8 +298,25 @@
 
     if (!core) throw new Error("HalationBridge: core is required");
 
-    var pairs = new Map();        // sourceKey ("doc:layerId" | "doc:composite") -> resultId
-    var resultSource = new Map(); // "doc:resultId" -> sourceLayerId | "composite"
+    // Result layers made in this session. Nothing is removed from these maps: layer IDs
+    // are never reused within a document, and an ID that vanished (deleted, or undone)
+    // can come back with Undo/Redo. Every use filters by existence (liveResultIds), so
+    // IDs of layers that no longer exist never reach a plan.
+    var results = new Map();      // sourceKey ("doc:layerId" | "doc:composite") -> [resultId, ...] oldest first
+    var resultSource = new Map(); // "doc:resultId" -> { docId, id, source: sourceLayerId | "composite" }
+    var MAX_RESULTS_PER_SOURCE = 64;
+
+    function rememberResult(plan, resultId) {
+      var list = results.get(plan.sourceKey) || [];
+      list.push(resultId);
+      if (list.length > MAX_RESULTS_PER_SOURCE) list.splice(0, list.length - MAX_RESULTS_PER_SOURCE);
+      results.set(plan.sourceKey, list);
+      resultSource.set(key(plan.docId, resultId), {
+        docId: plan.docId,
+        id: resultId,
+        source: plan.mode === "composite" ? "composite" : plan.sourceLayerId
+      });
+    }
 
     // ---- environment info
 
@@ -372,9 +411,83 @@
       return null;
     }
 
-    function existingLayerId(doc, id) {
-      if (id === undefined || id === null) return null;
-      return findLayerById(doc, id) ? id : null;
+    /** The layer list (doc.layers or a group's layers) that holds the layer with this id. */
+    function containerList(container, id) {
+      var layers = toArray(safe(function () { return container.layers; }));
+      for (var i = 0; i < layers.length; i++) {
+        if (layers[i].id === id) return layers;
+        var inner = containerList(layers[i], id);
+        if (inner) return inner;
+      }
+      return null;
+    }
+
+    /** True when `layer` already sits directly above `target` in the same list (review М3). */
+    function isDirectlyAbove(doc, layer, target) {
+      var list = containerList(doc, target.id);
+      if (!list) return false;
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].id === target.id) return i > 0 && list[i - 1].id === layer.id;
+      }
+      return false;
+    }
+
+    /** Layer ids in stacking order, top first (groups before their contents). */
+    function stackOrder(container, out) {
+      out = out || [];
+      var layers = toArray(safe(function () { return container.layers; }));
+      for (var i = 0; i < layers.length; i++) {
+        out.push(layers[i].id);
+        stackOrder(layers[i], out);
+      }
+      return out;
+    }
+
+    /** Result ids of a source that still exist in the document. */
+    function liveResultIds(doc, sourceKey) {
+      return (results.get(sourceKey) || []).filter(function (id) { return !!findLayerById(doc, id); });
+    }
+
+    /** The visually topmost of the given layer ids, or null. */
+    function topmostLayer(doc, ids) {
+      if (!ids.length) return null;
+      var order = stackOrder(doc);
+      for (var i = 0; i < order.length; i++) {
+        if (ids.indexOf(order[i]) >= 0) return findLayerById(doc, order[i]);
+      }
+      return null;
+    }
+
+    /** Every existing result layer of this document made in this session. */
+    function resultLayersOf(doc) {
+      var out = [];
+      resultSource.forEach(function (r) {
+        if (r.docId !== doc.id) return;
+        var l = findLayerById(doc, r.id);
+        if (l) out.push(l);
+      });
+      return out;
+    }
+
+    // Composite reads must not see earlier Halation results (review С4): hide the visible
+    // ones for the read, inside the caller's modal scope, and give back their ids.
+    function hideResultLayers(doc) {
+      var hidden = [];
+      resultLayersOf(doc).forEach(function (l) {
+        if (safe(function () { return l.visible; }) !== false) {
+          l.visible = false;
+          hidden.push(l.id);
+        }
+      });
+      if (hidden.length) log("Слои Halation скрыты на время чтения видимого изображения", hidden);
+      return hidden;
+    }
+
+    function restoreVisibility(doc, ids) {
+      for (var i = 0; i < ids.length; i++) {
+        var l = findLayerById(doc, ids[i]);
+        if (l) l.visible = true;
+      }
     }
 
     function topLevelIds(doc) {
@@ -538,10 +651,13 @@
         area: docBounds,
         docLongSide: docLongSide,
         sourceKey: compKey,
-        previousResultId: opts.replacePrevious ? existingLayerId(doc, pairs.get(compKey)) : null,
+        previousResultIds: opts.replacePrevious ? liveResultIds(doc, compKey) : [],
         reselectId: activeLayer ? activeLayer.id : null,
         label: "видимое изображение"
       };
+      if (resultLayersOf(doc).length) {
+        rep.compositeNote = "Слои Halation на время чтения видимого изображения скрываются, ореол не удвоится.";
+      }
 
       if (active.length > 1) {
         rep.notes.push("Выбрано несколько слоёв (" + active.length + ") — обрабатывается «" +
@@ -550,7 +666,8 @@
 
       var sourceLayer = activeLayer;
       if (activeLayer) {
-        var rs = resultSource.get(key(d.id, activeLayer.id));
+        var entry = resultSource.get(key(d.id, activeLayer.id));
+        var rs = entry ? entry.source : undefined;
         if (rs === "composite") {
           rep.offerComposite = true;
           rep.canUseLayer = false;
@@ -565,7 +682,6 @@
             rep.notes.push("Активен слой результата — эффект будет применён к его исходному слою «" +
               (safe(function () { return src.name; }) || "") + "».");
           } else {
-            resultSource.delete(key(d.id, activeLayer.id));
             rep.warnings.push("Исходный слой этого результата не найден — будет обработан сам слой результата.");
           }
         }
@@ -614,8 +730,9 @@
         area: area,
         docLongSide: docLongSide,
         sourceKey: srcKey,
-        previousResultId: opts.replacePrevious ? existingLayerId(doc, pairs.get(srcKey)) : null,
+        previousResultIds: opts.replacePrevious ? liveResultIds(doc, srcKey) : [],
         reselectId: sourceLayer.id,
+        layerBounds: li.bounds, // tight pixel bounds: its first and last rows hold pixels
         label: "слой «" + li.name + "»"
       };
       rep.source = { mode: "layer", layerId: sourceLayer.id, area: area, viaResult: sourceLayer !== activeLayer };
@@ -704,17 +821,19 @@
             res = await imaging.getPixels(opts);
           } catch (err) {
             if ((ctx && ctx.isCancelled) || isCancelError(err) || isModalBusyError(err)) throw err;
-            if (o && o.expectData) throw err;
-            // Deliberate, narrow exception: Photoshop may report an entirely transparent
-            // strip as an error instead of an empty result (doc §5.5: an empty strip is
-            // not an error). The strip is treated as empty and logged; if every strip
-            // fails, the caller rethrows the first error, and a strip that had data in
-            // pass 1 must not fail in pass 2 (expectData).
+            if (!o || !o.tolerate) throw err;
+            // Deliberate, narrow exception (review С5): Photoshop may report an entirely
+            // transparent strip as an error instead of an empty result (doc §5.5: an empty
+            // strip is not an error). The caller allows this only in layer mode, only for
+            // strips the layer bounds do not prove to hold pixels, and only when pass 1
+            // and pass 2 agree. The strip counts as empty; the panel warns about it.
             stats.toleratedErrors++;
             if (stats.toleratedMessages.length < 5) stats.toleratedMessages.push("y=" + req.top + ": " + errorText(err));
             if (!R.firstError) R.firstError = err;
             log("getPixels: ошибка на полосе y=" + req.top + " считается пустой полосой: " + errorText(err));
-            return emptyStrip(h);
+            var tolerated = emptyStrip(h);
+            tolerated.tolerated = true;
+            return tolerated;
           }
           imageData = res && res.imageData;
           if (!imageData) {
@@ -816,15 +935,24 @@
         throw new Error("В этой версии Photoshop нет createPixelLayer");
       }
       if (!layer) throw new Error("Photoshop не вернул созданный слой");
+      var target, placedAbove;
       if (plan.mode === "layer") {
-        var src = findLayerById(doc, plan.sourceLayerId);
-        if (!src) throw new Error("Исходный слой не найден");
-        await layer.move(src, placeBefore());
+        // Above the topmost existing result of this source, so an earlier opaque result
+        // never hides the new one (review С3); otherwise right above the source.
+        var prev = topmostLayer(doc, liveResultIds(doc, plan.sourceKey).filter(function (id) { return id !== layer.id; }));
+        target = prev || findLayerById(doc, plan.sourceLayerId);
+        if (!target) throw new Error("Исходный слой не найден");
+        placedAbove = prev ? "result" : "source";
       } else {
-        var top = toArray(safe(function () { return doc.layers; }))[0];
-        if (top && top.id !== layer.id) await layer.move(top, placeBefore());
+        target = toArray(safe(function () { return doc.layers; }))[0];
+        placedAbove = "top";
       }
-      return layer;
+      var moved = false;
+      if (target && target.id !== layer.id && !isDirectlyAbove(doc, layer, target)) {
+        await layer.move(target, placeBefore());
+        moved = true;
+      }
+      return { layer: layer, placedAbove: placedAbove, moved: moved };
     }
 
     async function selectLayer(id) {
@@ -840,6 +968,23 @@
       if (r0 && r0._obj === "error") throw new Error("Не удалось выбрать слой: " + (r0.message || r0.result));
     }
 
+    /**
+     * Which strips may come back as a getPixels error and still count as empty (review С5).
+     * Never for the composite (it has no empty strips). In layer mode, boundsNoEffects is
+     * tight, so the strip holding its first row and the strip holding its last row have
+     * pixels whenever those rows lie inside the document.
+     */
+    function tolerancePolicy(plan, area, nStrips) {
+      if (plan.mode !== "layer" || !plan.layerBounds) return function () { return false; };
+      var topKnown = plan.layerBounds.top === area.top;
+      var bottomKnown = plan.layerBounds.bottom === area.bottom;
+      return function (i) {
+        if (i === 0 && topKnown) return false;
+        if (i === nStrips - 1 && bottomKnown) return false;
+        return true;
+      };
+    }
+
     function chooseRows(proc, W, H) {
       var r = stripRowsOverride || Math.floor(num(proc.stripRows));
       if (!(r >= 1)) r = Math.max(1, Math.floor(PREVIEW_STRIP_PIXELS / W));
@@ -853,6 +998,20 @@
 
     // ---- apply (doc §6.2, §5.5-5.6)
 
+    // Errors leave the modal scope as they are (Photoshop rolls back). Outside it, mark
+    // them from facts recorded inside: ctx.isCancelled and our own "nothing to do".
+    function classifyError(err, outcome) {
+      if (outcome.nothing && !(err && err.halationNothingToDo)) return flagError(err, "halationNothingToDo");
+      if (outcome.cancelled && !isCancelError(err)) return flagError(err, "halationCancelled", "Операция отменена пользователем");
+      return err;
+    }
+
+    function stripMismatch(req, hadBefore) {
+      return new Error("Полоса y=" + req + " изменилась между проходами: в первом проходе " +
+        (hadBefore ? "были пиксели, во втором их нет" : "пикселей не было, во втором они появились") +
+        ". Документ не изменён; попробуйте ещё раз.");
+    }
+
     async function apply(args) {
       args = args || {};
       var plan = args.plan;
@@ -864,116 +1023,134 @@
       var t0 = now();
       var proc = null;
       var resultId = null;
+      var outcome = { cancelled: false, nothing: false };
       try {
         await runModal(async function (ctx) {
-          var doc = activeDocChecked(plan.docId);
-          var hc = ctx && ctx.hostControl;
-          var suspension = null;
-          if (hc && typeof hc.suspendHistory === "function") {
-            suspension = await hc.suspendHistory({ documentID: doc.id, name: RESULT_LAYER_NAME });
-          }
-          var report = progressReporter(ctx, args.onProgress);
-          stats.layerOrder = { before: topLevelIds(doc), after: null };
-
-          // The previous result goes away in the same history step. Before reading,
-          // so a composite read does not include it.
-          if (plan.previousResultId !== null && plan.previousResultId !== undefined) {
-            var old = findLayerById(doc, plan.previousResultId);
-            if (old) {
-              await old.delete();
-              stats.deletedPreviousId = plan.previousResultId;
+          try {
+            var doc = activeDocChecked(plan.docId);
+            var hc = ctx && ctx.hostControl;
+            var suspension = null;
+            if (hc && typeof hc.suspendHistory === "function") {
+              suspension = await hc.suspendHistory({ documentID: doc.id, name: RESULT_LAYER_NAME });
             }
+            var report = progressReporter(ctx, args.onProgress);
+            stats.layerOrder = { before: topLevelIds(doc), after: null };
+
+            // Previous results go away in the same history step, before reading.
+            var deleted = [];
+            var prevIds = plan.previousResultIds || [];
+            for (var p = 0; p < prevIds.length; p++) {
+              var old = findLayerById(doc, prevIds[p]);
+              if (old) {
+                await old.delete();
+                deleted.push(prevIds[p]);
+              }
+            }
+            stats.deletedPreviousIds = deleted;
+
+            // The composite must not include earlier results (review С4).
+            var hidden = plan.mode === "composite" ? hideResultLayers(doc) : [];
+            stats.hiddenDuringRead = hidden;
+
+            var area = plan.area;
+            var W = rectW(area), H = rectH(area);
+            proc = core.createProcessor({
+              width: W,
+              height: H,
+              originX: area.left,
+              originY: area.top,
+              docLongSide: plan.docLongSide,
+              settings: settings
+            });
+            var rows = chooseRows(proc, W, H);
+            var nStrips = Math.ceil(H / rows);
+            stats.strips = nStrips;
+            stats.stripRows = rows;
+            var mayBeEmpty = tolerancePolicy(plan, area, nStrips);
+            var reader = makeReader(doc.id, plan, area, stats, ctx, pool);
+            var had = new Array(nStrips);
+            var i, y0, h;
+
+            // Pass 1: read strips, linearize and accumulate into the base grid.
+            var t = now();
+            stats.toleratedStrips = 0;
+            for (i = 0; i < nStrips; i++) {
+              y0 = i * rows;
+              h = Math.min(rows, H - y0);
+              var s1 = await reader.read(y0, h, { pass: 1, tolerate: mayBeEmpty(i) });
+              had[i] = s1.hadData;
+              if (s1.tolerated) stats.toleratedStrips++;
+              proc.pass1(s1.data, s1.components, y0, h);
+              report(WEIGHTS.read * (i + 1) / nStrips, "чтение");
+              await checkpoint(ctx);
+            }
+            stats.timings.read = now() - t;
+            if (had.indexOf(true) < 0) {
+              if (reader.firstError) throw reader.firstError;
+              outcome.nothing = true;
+              throw nothingToDoError("В области слоя нет пикселей — нечего обрабатывать.");
+            }
+
+            // Blur on the pyramid, yielding between steps.
+            t = now();
+            for (var prog of proc.blurSteps()) {
+              report(WEIGHTS.read + WEIGHTS.blur * clamp01(prog), "размытие");
+              await checkpoint(ctx);
+            }
+            stats.timings.blur = now() - t;
+
+            // New layer above the source or its topmost earlier result (top for the composite).
+            t = now();
+            var made = await createResultLayer(doc, plan);
+            resultId = made.layer.id;
+            stats.placedAbove = made.placedAbove;
+            stats.layerMoved = made.moved;
+            stats.timings.layer = now() - t;
+
+            // Pass 2: re-read the same strips and write the output. Each strip must look
+            // the same as in pass 1 (has pixels or not), otherwise the blur used other data.
+            t = now();
+            for (i = 0; i < nStrips; i++) {
+              y0 = i * rows;
+              h = Math.min(rows, H - y0);
+              var s2 = await reader.read(y0, h, { pass: 2, tolerate: !had[i] && mayBeEmpty(i) });
+              if (s2.hadData !== had[i]) throw stripMismatch(area.top + y0, had[i]);
+              var out = pool.get("out", h * W * s2.components);
+              proc.pass2(s2.data, s2.components, y0, h, out);
+              if (s2.hadData) await writeStrip(doc.id, resultId, out, W, s2, area, y0, reader.meta, stats, pool);
+              report(WEIGHTS.read + WEIGHTS.blur + WEIGHTS.write * (i + 1) / nStrips, "запись");
+              await checkpoint(ctx);
+            }
+            stats.timings.write = now() - t;
+
+            // Visibility back before committing, then the source becomes active again.
+            restoreVisibility(doc, hidden);
+            var reselect = plan.reselectId !== null && plan.reselectId !== undefined && findLayerById(doc, plan.reselectId)
+              ? plan.reselectId : resultId;
+            await selectLayer(reselect);
+            stats.reselectedId = reselect;
+            stats.layerOrder.after = topLevelIds(doc);
+
+            if (suspension !== null && suspension !== undefined) await hc.resumeHistory(suspension, true);
+          } finally {
+            // Not a catch: errors still leave the modal scope untouched.
+            if (ctx && ctx.isCancelled) outcome.cancelled = true;
           }
-
-          var area = plan.area;
-          var W = rectW(area), H = rectH(area);
-          proc = core.createProcessor({
-            width: W,
-            height: H,
-            originX: area.left,
-            originY: area.top,
-            docLongSide: plan.docLongSide,
-            settings: settings
-          });
-          var rows = chooseRows(proc, W, H);
-          var nStrips = Math.ceil(H / rows);
-          stats.strips = nStrips;
-          stats.stripRows = rows;
-          var reader = makeReader(doc.id, plan, area, stats, ctx, pool);
-          var had = new Array(nStrips);
-          var i, y0, h;
-
-          // Pass 1: read strips, linearize and accumulate into the base grid.
-          var t = now();
-          for (i = 0; i < nStrips; i++) {
-            y0 = i * rows;
-            h = Math.min(rows, H - y0);
-            var s1 = await reader.read(y0, h, { pass: 1 });
-            had[i] = s1.hadData;
-            proc.pass1(s1.data, s1.components, y0, h);
-            report(WEIGHTS.read * (i + 1) / nStrips, "чтение");
-            await checkpoint(ctx);
-          }
-          stats.timings.read = now() - t;
-          if (had.indexOf(true) < 0) {
-            if (reader.firstError) throw reader.firstError;
-            throw nothingToDoError("В области слоя нет пикселей — нечего обрабатывать.");
-          }
-
-          // Blur on the pyramid, yielding between steps.
-          t = now();
-          for (var prog of proc.blurSteps()) {
-            report(WEIGHTS.read + WEIGHTS.blur * clamp01(prog), "размытие");
-            await checkpoint(ctx);
-          }
-          stats.timings.blur = now() - t;
-
-          // New layer right above the source (or on top for the composite).
-          t = now();
-          var layer = await createResultLayer(doc, plan);
-          resultId = layer.id;
-          stats.timings.layer = now() - t;
-
-          // Pass 2: re-read the same strips and write the output.
-          t = now();
-          for (i = 0; i < nStrips; i++) {
-            y0 = i * rows;
-            h = Math.min(rows, H - y0);
-            var s2 = await reader.read(y0, h, { pass: 2, expectData: had[i] });
-            var out = pool.get("out", h * W * s2.components);
-            proc.pass2(s2.data, s2.components, y0, h, out);
-            if (s2.hadData) await writeStrip(doc.id, resultId, out, W, s2, area, y0, reader.meta, stats, pool);
-            report(WEIGHTS.read + WEIGHTS.blur + WEIGHTS.write * (i + 1) / nStrips, "запись");
-            await checkpoint(ctx);
-          }
-          stats.timings.write = now() - t;
-
-          // The source becomes active again before leaving the modal scope.
-          var reselect = plan.reselectId !== null && plan.reselectId !== undefined && findLayerById(doc, plan.reselectId)
-            ? plan.reselectId : resultId;
-          await selectLayer(reselect);
-          stats.reselectedId = reselect;
-          stats.layerOrder.after = topLevelIds(doc);
-
-          if (suspension !== null && suspension !== undefined) await hc.resumeHistory(suspension, true);
         }, COMMAND_NAME);
       } catch (err) {
         // Outside the modal scope: Photoshop has already rolled the document back.
+        var e = classifyError(err, outcome);
         stats.timings.total = now() - t0;
-        stats.cancelled = isCancelError(err);
-        stats.error = errorText(err);
+        stats.cancelled = isCancelError(e);
+        stats.error = errorText(e);
         stats.coreStats = procStats(proc);
-        attach(err, "halationStats", stats);
-        throw err;
+        attach(e, "halationStats", stats);
+        throw e;
       }
       stats.ok = true;
       stats.timings.total = now() - t0;
       stats.coreStats = procStats(proc);
-      if (resultId !== null) {
-        if (stats.deletedPreviousId !== undefined) resultSource.delete(key(plan.docId, stats.deletedPreviousId));
-        pairs.set(plan.sourceKey, resultId);
-        resultSource.set(key(plan.docId, resultId), plan.mode === "composite" ? "composite" : plan.sourceLayerId);
-      }
+      if (resultId !== null) rememberResult(plan, resultId);
       return { resultLayerId: resultId, stats: stats };
     }
 
@@ -988,40 +1165,72 @@
       var pool = new ScratchPool();
       var t0 = now();
       var proxy = null;
+      var outcome = { cancelled: false, nothing: false };
       try {
         await runModal(async function (ctx) {
-          var doc = activeDocChecked(plan.docId);
-          var area = plan.area;
-          var W = rectW(area), H = rectH(area);
-          var b = core.createPreviewBuilder({ width: W, height: H, maxLongSide: maxLongSide });
-          var rows = Math.max(1, Math.min(H, stripRowsOverride || Math.floor(PREVIEW_STRIP_PIXELS / W)));
-          var n = Math.ceil(H / rows);
-          stats.strips = n;
-          stats.stripRows = rows;
-          var reader = makeReader(doc.id, plan, area, stats, ctx, pool);
-          var report = progressReporter(ctx, args.onProgress);
-          var any = false;
-          var t = now();
-          for (var i = 0; i < n; i++) {
-            var y0 = i * rows, h = Math.min(rows, H - y0);
-            var s = await reader.read(y0, h, { pass: 1 });
-            if (s.hadData) any = true;
-            b.push(s.data, s.components, y0, h);
-            report((i + 1) / n, "предпросмотр");
-            await checkpoint(ctx);
+          try {
+            var doc = activeDocChecked(plan.docId);
+            // Composite: hide earlier results for the read (review С4). Inside a suspended
+            // history that is discarded at the end, so nothing lands in the History panel;
+            // on an exception Photoshop rolls the visibility back as well.
+            var hidden = [];
+            var suspension = null;
+            var hc = ctx && ctx.hostControl;
+            if (plan.mode === "composite") {
+              var visibleResults = resultLayersOf(doc).filter(function (l) {
+                return safe(function () { return l.visible; }) !== false;
+              });
+              if (visibleResults.length) {
+                if (hc && typeof hc.suspendHistory === "function") {
+                  suspension = await hc.suspendHistory({ documentID: doc.id, name: "Halation: предпросмотр" });
+                }
+                hidden = hideResultLayers(doc);
+              }
+            }
+            stats.hiddenDuringRead = hidden;
+
+            var area = plan.area;
+            var W = rectW(area), H = rectH(area);
+            var b = core.createPreviewBuilder({ width: W, height: H, maxLongSide: maxLongSide });
+            var rows = Math.max(1, Math.min(H, stripRowsOverride || Math.floor(PREVIEW_STRIP_PIXELS / W)));
+            var n = Math.ceil(H / rows);
+            stats.strips = n;
+            stats.stripRows = rows;
+            stats.toleratedStrips = 0;
+            var mayBeEmpty = tolerancePolicy(plan, area, n);
+            var reader = makeReader(doc.id, plan, area, stats, ctx, pool);
+            var report = progressReporter(ctx, args.onProgress);
+            var any = false;
+            var t = now();
+            for (var i = 0; i < n; i++) {
+              var y0 = i * rows, h = Math.min(rows, H - y0);
+              var s = await reader.read(y0, h, { pass: 1, tolerate: mayBeEmpty(i) });
+              if (s.hadData) any = true;
+              if (s.tolerated) stats.toleratedStrips++;
+              b.push(s.data, s.components, y0, h);
+              report((i + 1) / n, "предпросмотр");
+              await checkpoint(ctx);
+            }
+            if (!any && reader.firstError) throw reader.firstError;
+            stats.timings.read = now() - t;
+
+            restoreVisibility(doc, hidden);
+            if (suspension !== null && suspension !== undefined) await hc.resumeHistory(suspension, false);
+
+            t = now();
+            proxy = b.finish();
+            stats.timings.finish = now() - t;
+          } finally {
+            if (ctx && ctx.isCancelled) outcome.cancelled = true;
           }
-          if (!any && reader.firstError) throw reader.firstError;
-          stats.timings.read = now() - t;
-          t = now();
-          proxy = b.finish();
-          stats.timings.finish = now() - t;
         }, "Halation: предпросмотр");
       } catch (err) {
+        var e = classifyError(err, outcome);
         stats.timings.total = now() - t0;
-        stats.cancelled = isCancelError(err);
-        stats.error = errorText(err);
-        attach(err, "halationStats", stats);
-        throw err;
+        stats.cancelled = isCancelError(e);
+        stats.error = errorText(e);
+        attach(e, "halationStats", stats);
+        throw e;
       }
       stats.ok = true;
       stats.timings.total = now() - t0;
@@ -1103,7 +1312,7 @@
       pickColor: pickColor,
       watchChanges: watchChanges,
       describeError: describeError,
-      _pairs: pairs,
+      _results: results,
       _resultSource: resultSource
     };
   }

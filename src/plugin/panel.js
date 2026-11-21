@@ -567,14 +567,18 @@
       return;
     }
     if (state.busy) return;
+    // Busy before the first await, so a second click cannot start a second modal (review М1).
+    setBusy(true, "Предпросмотр…");
     var rep;
     try {
       rep = await state.bridge.inspect({ replacePrevious: false });
     } catch (e) {
       diag.error(e, "inspect (предпросмотр)");
       setPreviewPlaceholder("Не удалось прочитать документ — см. «Диагностика».");
+      setBusy(false);
       return;
     }
+    if (rep.blocking.length || rep.nothingToDo) setBusy(false);
     diag.set("target", rep);
     if (rep.blocking.length) {
       state.proxy = null;
@@ -589,7 +593,6 @@
       return;
     }
     var plan = rep.plans.layer || rep.plans.composite;
-    setBusy(true, "Предпросмотр…");
     var progressEl = $("preview-progress");
     var lastPct = -1;
     progressEl.textContent = "Готовлю предпросмотр…";
@@ -669,38 +672,56 @@
       return;
     }
     if (state.busy) return;
-    hideConfirm();
-    showStatus("info", "");
-    var t0 = nowMs();
-    var rep;
+    // Busy before the first await, so a double click cannot start two modals (review М1).
+    setBusy(true, "Проверка…");
     try {
-      rep = await state.bridge.inspect({ replacePrevious: state.ui.replace });
-    } catch (e) {
-      diag.error(e, "inspect");
-      showStatus("error", Bridge.describeError(e).text);
-      return;
+      hideConfirm();
+      showStatus("info", "");
+      var t0 = nowMs();
+      var rep;
+      try {
+        rep = await state.bridge.inspect({ replacePrevious: state.ui.replace });
+      } catch (e) {
+        diag.error(e, "inspect");
+        showStatus("error", Bridge.describeError(e).text);
+        return;
+      }
+      var preflightMs = nowMs() - t0;
+      diag.set("target", rep);
+      if (rep.blocking.length) {
+        showStatus("error", rep.blocking.join(" "));
+        return;
+      }
+      if (rep.nothingToDo) {
+        showStatus("info", rep.nothingMessage);
+        return;
+      }
+      var warnings = rep.warnings.filter(function (w) {
+        return !(state.memoryWarned && rep.memoryWarning && w === rep.memoryWarning);
+      });
+      if (warnings.length || !rep.plans.layer) {
+        showConfirm(rep, rep.notes.concat(warnings), preflightMs);
+        return;
+      }
+      if (rep.notes.length) showStatus("info", rep.notes.join(" "));
+      await runApply(rep, rep.plans.layer, preflightMs);
+    } finally {
+      setBusy(false);
     }
-    var preflightMs = nowMs() - t0;
-    diag.set("target", rep);
-    if (rep.blocking.length) {
-      showStatus("error", rep.blocking.join(" "));
-      return;
-    }
-    if (rep.nothingToDo) {
-      showStatus("info", rep.nothingMessage);
-      return;
-    }
-    var warnings = rep.warnings.filter(function (w) {
-      return !(state.memoryWarned && rep.memoryWarning && w === rep.memoryWarning);
-    });
-    if (warnings.length || !rep.plans.layer) {
-      showConfirm(rep, rep.notes.concat(warnings), preflightMs);
-      return;
-    }
-    if (rep.notes.length) showStatus("info", rep.notes.join(" "));
-    await runApply(rep, rep.plans.layer, preflightMs);
   }
 
+  // From the confirmation box: same synchronous busy guard.
+  async function startConfirmedApply(rep, plan, preflightMs) {
+    if (state.busy || !plan) return;
+    setBusy(true, "Обработка…");
+    try {
+      await runApply(rep, plan, preflightMs);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Caller holds the busy flag.
   async function runApply(rep, plan, preflightMs) {
     hideConfirm();
     if (rep && rep.memoryWarning) state.memoryWarned = true;
@@ -724,9 +745,18 @@
       diag.set("apply", res.stats);
       var sec = ((nowMs() - t0) / 1000).toFixed(1);
       diag.log("Применено: " + plan.label + ", " + sec + " с, слой id " + res.resultLayerId);
-      showStatus("ok", "Готово за " + sec + " с: создан слой «Halation» " +
-        (plan.mode === "layer" ? "над исходным слоем." : "поверх всех слоёв.") +
-        (res.stats.deletedPreviousId !== undefined ? " Прежний результат удалён." : ""));
+      var placed = plan.mode !== "layer" ? "поверх всех слоёв."
+        : res.stats.placedAbove === "result" ? "над прежним результатом." : "над исходным слоем.";
+      var removed = res.stats.deletedPreviousIds && res.stats.deletedPreviousIds.length ? " Прежний результат удалён." : "";
+      if (res.stats.toleratedStrips > 0) {
+        // review С5: never a plain "Готово" when some strips could not be read
+        diag.log("Применено с пропущенными полосами: " + res.stats.toleratedStrips, res.stats.toleratedMessages);
+        showStatus("warn", "Готово за " + sec + " с, но " + res.stats.toleratedStrips +
+          " полос(ы) Photoshop не отдал и они сочтены прозрачными. Если там слой не прозрачный, результат неполный: " +
+          "отмените (Cmd/Ctrl+Z) и примените ещё раз. Подробности — в «Диагностике».");
+      } else {
+        showStatus("ok", "Готово за " + sec + " с: создан слой «Halation» " + placed + removed);
+      }
     } catch (e) {
       var d = Bridge.describeError(e);
       if (d.kind === "cancelled") diag.log("Применение отменено");
@@ -888,11 +918,11 @@
     $("btn-apply").addEventListener("click", onApply);
     $("confirm-layer").addEventListener("click", function () {
       var p = state.pendingConfirm;
-      if (p && p.rep.plans.layer) runApply(p.rep, p.rep.plans.layer, p.preflightMs);
+      if (p) startConfirmedApply(p.rep, p.rep.plans.layer, p.preflightMs);
     });
     $("confirm-composite").addEventListener("click", function () {
       var p = state.pendingConfirm;
-      if (p && p.rep.plans.composite) runApply(p.rep, p.rep.plans.composite, p.preflightMs);
+      if (p) startConfirmedApply(p.rep, p.rep.plans.composite, p.preflightMs);
     });
     $("confirm-cancel").addEventListener("click", function () {
       hideConfirm();

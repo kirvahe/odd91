@@ -10,7 +10,8 @@
     "bluenoise": "node tools/gen-bluenoise.mjs",
     "bench": "node --jitless tools/bench.mjs",
     "build": "node tools/build-ccx.mjs",
-    "icons": "node tools/gen-icons.mjs"
+    "icons": "node tools/gen-icons.mjs",
+    "release": "node tools/make-release.mjs"
   },
   "engines": {
     "node": ">=21"

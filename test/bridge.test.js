@@ -237,7 +237,10 @@ for (const emptyMode of ["null", "throw", "zero"]) {
     // the new layer sits right above the source, and the source is active again
     const ids = fake.doc.layers.map((l) => l.id);
     assert.equal(ids.indexOf(res.resultLayerId), ids.indexOf(2) - 1);
-    assert.deepEqual(fake.log.moves, [{ id: res.resultLayerId, rel: 2, placement: "placeBefore" }]);
+    // createPixelLayer already put it above the active source: no move call (review М3)
+    assert.deepEqual(fake.log.moves, []);
+    assert.equal(res.stats.layerMoved, false);
+    assert.equal(res.stats.placedAbove, "source");
     assert.deepEqual(fake.doc._active, [2]);
     assert.equal(res.stats.reselectedId, 2);
 
@@ -298,7 +301,7 @@ for (const [label, cancelAt, created] of [["blur", 0.2, 0], ["write", 0.6, 1]]) 
     assert.deepEqual(fake.doc.layers.map((l) => l.id), idsBefore, "document rolled back");
     assert.equal(fake.log.rollbacks, 1);
     assert.equal(fake.log.resume.length, 0, "history not committed");
-    assert.equal(bridge._pairs.size, 0, "no pair recorded");
+    assert.equal(bridge._results.size, 0, "no result recorded");
     allDisposed(fake);
   });
 }
@@ -345,7 +348,7 @@ test("re-apply from the result layer: source is used, previous result replaced i
   fake.doc._active = [first.resultLayerId];
   const rep = await bridge.inspect({ replacePrevious: true });
   assert.equal(rep.plans.layer.sourceLayerId, 2);
-  assert.equal(rep.plans.layer.previousResultId, first.resultLayerId);
+  assert.deepEqual(rep.plans.layer.previousResultIds, [first.resultLayerId]);
   assert.ok(rep.notes.some((n) => /исходному слою «Огни»/.test(n)));
   const second = await bridge.apply({ settings: core.normalizeSettings({ strength: 30 }), plan: rep.plans.layer });
 
@@ -354,16 +357,57 @@ test("re-apply from the result layer: source is used, previous result replaced i
   assert.equal(ids.filter((id) => fake.findLayer(id).name === "Halation").length, 1);
   assert.equal(ids.indexOf(second.resultLayerId), ids.indexOf(2) - 1);
   assert.deepEqual(fake.doc._active, [2]);
-  assert.equal(second.stats.deletedPreviousId, first.resultLayerId);
+  assert.deepEqual(second.stats.deletedPreviousIds, [first.resultLayerId]);
   assert.equal(fake.log.modal.length, 2);
-  assert.equal(fake.log.suspend.length, 2, "one history step per apply, deletion included");
+  assert.equal(fake.log.history.length, 2, "one history step per apply, deletion included");
   assert.equal(fake.log.deleted.length, 1);
+  // the deleted result no longer reaches a plan
+  assert.deepEqual((await bridge.inspect({ replacePrevious: true })).plans.layer.previousResultIds, [second.resultLayerId]);
+});
 
-  // without "replace", the next result is added on top of the old one
-  const rep3 = await bridge.inspect({ replacePrevious: false });
-  assert.equal(rep3.plans.layer.previousResultId, null);
-  await bridge.apply({ settings: SETTINGS, plan: rep3.plans.layer });
-  assert.equal(fake.doc.layers.filter((l) => l.name === "Halation").length, 2);
+test("re-apply with 'replace' off: the new result goes above the old one, not under it", async () => {
+  const fake = offsetLayerFake("null");
+  const { bridge } = makeBridge(fake, { stripRows: 8 });
+  const r1 = await bridge.apply({ settings: SETTINGS, plan: (await bridge.inspect({ replacePrevious: false })).plans.layer });
+  assert.deepEqual(fake.doc._active, [2]);
+  // the source is active, so createPixelLayer puts R2 between the source and R1
+  const rep = await bridge.inspect({ replacePrevious: false });
+  assert.deepEqual(rep.plans.layer.previousResultIds, []);
+  const r2 = await bridge.apply({ settings: core.normalizeSettings({ strength: 90 }), plan: rep.plans.layer });
+  assert.deepEqual(fake.doc.layers.map((l) => l.id), [r2.resultLayerId, r1.resultLayerId, 2, 1]);
+  assert.equal(r2.stats.placedAbove, "result");
+  assert.equal(r2.stats.layerMoved, true);
+  assert.deepEqual(fake.log.moves.at(-1), { id: r2.resultLayerId, rel: r1.resultLayerId, placement: "placeBefore", noop: false });
+  assert.ok(fake.log.moves.every((m) => !m.noop), "no move that leaves the layer in place");
+  // a third one lands on top again
+  const r3 = await bridge.apply({ settings: SETTINGS, plan: (await bridge.inspect({ replacePrevious: false })).plans.layer });
+  assert.equal(fake.doc.layers[0].id, r3.resultLayerId);
+  assert.deepEqual(fake.doc._active, [2]);
+});
+
+test("after Undo the restored result is tracked again and IDs of undone layers are dropped", async () => {
+  const fake = offsetLayerFake("null");
+  const { bridge } = makeBridge(fake, { stripRows: 8 });
+  const r1 = await bridge.apply({ settings: SETTINGS, plan: (await bridge.inspect({ replacePrevious: true })).plans.layer });
+  const r2 = await bridge.apply({ settings: SETTINGS, plan: (await bridge.inspect({ replacePrevious: true })).plans.layer });
+  assert.ok(!fake.findLayer(r1.resultLayerId));
+
+  fake.undo(); // R1 is back with its ID, R2 is gone
+  assert.ok(fake.findLayer(r1.resultLayerId) && !fake.findLayer(r2.resultLayerId));
+
+  const rep = await bridge.inspect({ replacePrevious: true });
+  assert.deepEqual(rep.plans.layer.previousResultIds, [r1.resultLayerId], "only layers that exist");
+  // R1 is still recognised as a result layer
+  fake.doc._active = [r1.resultLayerId];
+  const viaResult = await bridge.inspect({ replacePrevious: true });
+  assert.equal(viaResult.plans.layer.sourceLayerId, 2);
+
+  const r3 = await bridge.apply({ settings: SETTINGS, plan: viaResult.plans.layer });
+  assert.deepEqual(r3.stats.deletedPreviousIds, [r1.resultLayerId]);
+  const halation = fake.doc.layers.filter((l) => l.name === "Halation").map((l) => l.id);
+  assert.deepEqual(halation, [r3.resultLayerId]);
+  const ids = fake.doc.layers.map((l) => l.id);
+  assert.equal(ids.indexOf(r3.resultLayerId), ids.indexOf(2) - 1);
 });
 
 test("composite: a smart object offers the visible image; result goes on top, reads have no layerID", async () => {
@@ -402,7 +446,125 @@ test("composite: a smart object offers the visible image; result goes on top, re
   fake.doc._active = [res.resultLayerId];
   const again = await bridge.inspect({ replacePrevious: true });
   assert.equal(again.plans.layer, null);
-  assert.equal(again.plans.composite.previousResultId, res.resultLayerId);
+  assert.deepEqual(again.plans.composite.previousResultIds, [res.resultLayerId]);
+  assert.match(again.compositeNote, /скрываются/);
+
+  // preview cache: the earlier result is hidden for the read, nothing lands in history
+  const historyBefore = fake.log.history.length;
+  fake.log.getPixels.length = 0;
+  const pv = await bridge.buildPreview({ plan: again.plans.composite });
+  assert.ok(fake.log.getPixels.length > 0);
+  assert.ok(fake.log.getPixels.every((g) => !g.visibleLayers.includes(res.resultLayerId)), "result hidden during the read");
+  assert.deepEqual(pv.stats.hiddenDuringRead, [res.resultLayerId]);
+  assert.equal(fake.findLayer(res.resultLayerId).visible, true, "visibility restored");
+  assert.equal(fake.log.resume.at(-1).commit, false, "history suspension discarded");
+  assert.equal(fake.log.history.length, historyBefore);
+
+  // apply again with "replace" off: no double halation, the old result stays visible below
+  fake.log.getPixels.length = 0;
+  const off = await bridge.inspect({ replacePrevious: false });
+  assert.deepEqual(off.plans.composite.previousResultIds, []);
+  const res2 = await bridge.apply({ settings: SETTINGS, plan: off.plans.composite });
+  assert.ok(fake.log.getPixels.every((g) => !g.visibleLayers.includes(res.resultLayerId)), "old result hidden while reading");
+  assertAreaEquals(fake.findLayer(res2.resultLayerId)._store, 36, 28, { left: 0, top: 0, right: 36, bottom: 28 }, expected, 3, "second composite result");
+  assert.equal(fake.findLayer(res.resultLayerId).visible, true, "old result visible again");
+  assert.deepEqual(fake.doc.layers.slice(0, 2).map((l) => l.id), [res2.resultLayerId, res.resultLayerId]);
+  assert.deepEqual(fake.doc._active, [res.resultLayerId], "the active layer is reselected");
+  assert.equal(fake.log.history.length, historyBefore + 1);
+  allDisposed(fake);
+});
+
+// ---------------------------------------------------------------- read errors (review С5)
+
+// Offset layer from offsetLayerFake: area top 5, 41 rows; with 4-row strips, strip 3
+// (doc rows 17-20) has pixels and lies between strips with pixels.
+const MID = 5 + 3 * 4;
+
+async function applyWithFailure(failGetPixels, extra = {}) {
+  const fake = offsetLayerFake("null", { failGetPixels, ...extra });
+  const { bridge } = makeBridge(fake, { stripRows: 4 });
+  const plan = (await bridge.inspect({})).plans.layer;
+  const idsBefore = fake.doc.layers.map((l) => l.id);
+  return { fake, bridge, plan, idsBefore, run: () => bridge.apply({ settings: SETTINGS, plan }) };
+}
+
+test("read error: the first strip of a layer (bounds prove pixels) fails the apply", async () => {
+  const t = await applyWithFailure((req, n) => n === 1);
+  await assert.rejects(t.run(), /getPixels failed \(injected\)/);
+  assert.deepEqual(t.fake.doc.layers.map((l) => l.id), t.idsBefore);
+  assert.equal(t.fake.log.rollbacks, 1);
+  allDisposed(t.fake);
+});
+
+test("read error: a middle strip failing only in pass 1 fails the apply (passes disagree)", async () => {
+  let calls = 0;
+  const t = await applyWithFailure((req) => req.top === MID && ++calls === 1);
+  await assert.rejects(t.run(), (err) => {
+    assert.match(err.message, /изменилась между проходами/);
+    assert.equal(Bridge.describeError(err).kind, "error");
+    return true;
+  });
+  assert.deepEqual(t.fake.doc.layers.map((l) => l.id), t.idsBefore);
+});
+
+test("read error: pass 2 returning nothing for a strip that had pixels fails the apply", async () => {
+  let calls = 0;
+  const t = await applyWithFailure((req) => (req.top === MID && ++calls === 2 ? "empty" : false));
+  await assert.rejects(t.run(), /изменилась между проходами/);
+  assert.equal(t.fake.log.rollbacks, 1);
+});
+
+test("read error: a middle strip failing in both passes is tolerated, counted and reported", async () => {
+  const t = await applyWithFailure((req) => req.top === MID);
+  const res = await t.run();
+  assert.equal(res.stats.toleratedErrors, 2);
+  assert.equal(res.stats.toleratedStrips, 1);
+  assert.ok(res.stats.toleratedMessages[0].includes("y=" + MID));
+  // nothing written for that strip
+  assert.ok(!t.fake.log.putPixels.some((p) => p.targetBounds.top <= MID && p.targetBounds.top + p.height > MID));
+});
+
+test("read error: the composite never tolerates a read error", async () => {
+  const fake = createFakePhotoshop({
+    width: 30,
+    height: 24,
+    compositeOpaque: true,
+    failGetPixels: (req, n) => n === 3,
+    layers: [{ id: 1, name: "Фон", opaque: true, pixels: { left: 0, top: 0, w: 30, h: 24, data: makePixels(30, 24) } }],
+  });
+  const { bridge } = makeBridge(fake, { stripRows: 4 });
+  await assert.rejects(bridge.apply({ settings: SETTINGS, plan: (await bridge.inspect({})).plans.composite }), /getPixels failed/);
+  assert.deepEqual(fake.doc.layers.map((l) => l.id), [1]);
+});
+
+test("error classes: cancel and busy are detected narrowly", () => {
+  assert.equal(Bridge.isModalBusyError(new Error("host is in a modal state")), true);
+  assert.equal(Bridge.isModalBusyError(new Error("Photoshop is currently in modal state (plugin X)")), true);
+  assert.equal(Bridge.isModalBusyError(new Error("putPixels requires a modal scope")), false);
+  assert.equal(Bridge.isModalBusyError(new Error("only allowed from inside a modal scope")), false);
+  assert.equal(Bridge.isCancelError(new Error("cancelled by the user")), true);
+  assert.equal(Bridge.isCancelError(new Error("Cannot read 'cancelButton' of undefined")), false);
+  assert.equal(Bridge.isCancelError(new Error("could not cancel the download")), false);
+  const n = new Error("x");
+  n.number = -128;
+  assert.equal(Bridge.isCancelError(n), true);
+});
+
+test("cancellation is recognised from executionContext.isCancelled even with an unrelated message", async () => {
+  // Photoshop's own call fails after the user pressed Esc, with a message we do not know
+  const fake = offsetLayerFake("null", { cancelAtProgress: 0.05 });
+  const real = fake.photoshop.imaging.getPixels;
+  let n = 0;
+  fake.photoshop.imaging.getPixels = async (o) => {
+    if (++n === 2) throw new Error("Error 8007: something went wrong");
+    return real(o);
+  };
+  const { bridge } = makeBridge(fake, { stripRows: 4 });
+  const plan = (await bridge.inspect({})).plans.layer;
+  await assert.rejects(bridge.apply({ settings: SETTINGS, plan }), (err) => {
+    assert.equal(Bridge.describeError(err).kind, "cancelled", err.message);
+    return true;
+  });
 });
 
 // ---------------------------------------------------------------- pre-flight

@@ -341,6 +341,40 @@ test('preview field matches the downscaled full field within 3 % of the halo pea
   }
 });
 
+test('preview "after" mixes a block in display light (thin white line under a x30 curve)', () => {
+  const w = 240;
+  const h = 120;
+  const d = fill(w, h, 3, 0);
+  for (let y = 0; y < h; y++) for (let x = 5; x < w; x += 12) setPx(d, w, x, y, 255);
+  const b = core.createPreviewBuilder({ width: w, height: h, maxLongSide: 20 });
+  b.push(d, 3, 0, h);
+  const proxy = b.finish();
+  assert.equal(proxy.block, 12);
+  const expected = Math.round(T.linearToSrgb(1 / 12) * 255); // one white column in twelve
+  for (const curve of [CURVES.srgb, { mode: 'curve', curvePoints: jumpCurve(30) }]) {
+    const img = core.renderPreview(proxy, Object.assign({ strength: 0 }, curve), 'after', { docLongSide: w });
+    for (let i = 0; i < img.data.length; i++) {
+      assert.ok(Math.abs(img.data[i] - expected) <= 2, `${curve.mode}: ${img.data[i]} vs ${expected}`);
+    }
+  }
+});
+
+test('preview cache ignores the RGB of fully transparent pixels (no phantom halo)', () => {
+  const w = 120;
+  const h = 80;
+  const make = (v) => {
+    const d = new Uint8Array(w * h * 4);
+    for (let i = 0; i < w * h; i++) { d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = 30; d[i * 4 + 3] = 255; }
+    for (let y = 30; y < 50; y++) for (let x = 50; x < 70; x++) { const p = (y * w + x) * 4; d[p] = d[p + 1] = d[p + 2] = v; d[p + 3] = 0; }
+    const b = core.createPreviewBuilder({ width: w, height: h, maxLongSide: 40 });
+    b.push(d, 4, 0, h);
+    return previewFields(b.finish(), { strength: 100, blur: 100 }, { docLongSide: 2000 }).field;
+  };
+  const white = make(255);
+  const black = make(0);
+  for (let i = 0; i < white.length; i++) assert.ok(Math.abs(white[i] - black[i]) < 1e-6, `index ${i}`);
+});
+
 test('renderPreview returns RGB of the proxy size for all views', () => {
   const d = blobs(320, 200, 5);
   const b = core.createPreviewBuilder({ width: 320, height: 200, maxLongSide: 100 });

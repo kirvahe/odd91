@@ -33,6 +33,12 @@
   code, .path { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.88em; background: var(--code); padding: 2px 6px; border-radius: 5px; word-break: break-all; }
   .toc { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 6px; }
   .toc a { text-decoration: none; border: 1px solid var(--line); background: var(--card); color: var(--ink); padding: 6px 12px; border-radius: 999px; font-size: 15px; }
+  .download { display: grid; grid-template-columns: minmax(220px, 280px) 1fr; gap: 16px; align-items: start; background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 18px; margin: 18px 0 6px; }
+  @media (max-width: 640px) { .download { grid-template-columns: 1fr; } }
+  .dl { display: block; text-align: center; text-decoration: none; background: var(--accent); color: #fff; font-weight: 700; font-size: 19px; padding: 16px 14px; border-radius: 12px; line-height: 1.3; }
+  .dl small { display: block; font-weight: 500; font-size: 13px; opacity: .85; }
+  .short ol { margin: 6px 0 8px; padding-left: 22px; }
+  .muted { color: var(--muted); font-size: 15px; }
   .need { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
   .need div { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
   .need b { display: block; }
@@ -110,6 +116,19 @@
     <a href="#update">Обновить или удалить</a>
   </nav>
 
+  <div class="download">
+    <a class="dl" href="https://github.com/kirvahe/odd91/releases/latest/download/odd91-halation.zip">⬇&nbsp; Скачать плагин &nbsp;<small>odd91-halation.zip</small></a>
+    <div class="short">
+      <b>Коротко, что делать:</b>
+      <ol>
+        <li>Закрой Photoshop.</li>
+        <li>Распакуй архив и перетащи папку <code>dev.halation.photoshop</code> в папку <b>Plug-ins</b> своего Photoshop.</li>
+        <li>Открой Photoshop → <b>Плагины → Halation</b>.</li>
+      </ol>
+      <p class="muted">Открыл эту страницу из архива? Тогда скачивать ничего не нужно: папка <code>dev.halation.photoshop</code> лежит рядом с этим файлом. Подробно, с картинками, — ниже.</p>
+    </div>
+  </div>
+
   <h2 id="need">Что нужно</h2>
   <div class="need">
     <div><b>Photoshop 2023 или новее</b>Версия 24.4 и выше. Creative Cloud не нужен.</div>
@@ -132,8 +151,8 @@
 
     <div class="step"><div class="num">2</div><div class="body">
       <h3>Скачай и распакуй</h3>
-      <p>Скачай архив <code>odd91-halation.zip</code> со страницы <a href="https://github.com/kirvahe/odd91/releases/latest">github.com/kirvahe/odd91/releases</a> (раздел <b>Assets</b>).</p>
-      <p>Дважды щёлкни по архиву. Рядом появится папка, а в ней — папка <code>dev.halation.photoshop</code>. Её мы и будем ставить.</p>
+      <p>Нажми оранжевую кнопку <b>«Скачать плагин»</b> вверху этой страницы. Если не качается — открой <a href="https://github.com/kirvahe/odd91/releases/latest">github.com/kirvahe/odd91/releases</a> и нажми <code>odd91-halation.zip</code> в разделе <b>Assets</b>.</p>
+      <p>Дважды щёлкни по скачанному архиву (обычно он в папке <b>Загрузки</b>). Появится папка <b>odd91-halation</b>, в ней — папка <code>dev.halation.photoshop</code> и эта инструкция. Ставить будем папку <code>dev.halation.photoshop</code>.</p>
     </div></div>
 
     <div class="step"><div class="num">3</div><div class="body">
@@ -176,8 +195,8 @@
 
     <div class="step"><div class="num">2</div><div class="body">
       <h3>Скачай и распакуй</h3>
-      <p>Скачай архив <code>odd91-halation.zip</code> со страницы <a href="https://github.com/kirvahe/odd91/releases/latest">github.com/kirvahe/odd91/releases</a> (раздел <b>Assets</b>).</p>
-      <p>Щёлкни по архиву правой кнопкой <span class="arrow">→</span> <span class="click">Извлечь всё…</span> <span class="arrow">→</span> <span class="click">Извлечь</span>. Внутри будет папка <code>dev.halation.photoshop</code>.</p>
+      <p>Нажми оранжевую кнопку <b>«Скачать плагин»</b> вверху этой страницы. Если не качается — открой <a href="https://github.com/kirvahe/odd91/releases/latest">github.com/kirvahe/odd91/releases</a> и нажми <code>odd91-halation.zip</code> в разделе <b>Assets</b>.</p>
+      <p>Найди архив в папке <b>Загрузки</b>, щёлкни по нему правой кнопкой <span class="arrow">→</span> <span class="click">Извлечь всё…</span> <span class="arrow">→</span> <span class="click">Извлечь</span>. Появится папка <b>odd91-halation</b>, в ней — папка <code>dev.halation.photoshop</code> и эта инструкция.</p>
     </div></div>
 
     <div class="step"><div class="num">3</div><div class="body">

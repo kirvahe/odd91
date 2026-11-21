@@ -8,7 +8,9 @@ const { NOISE } = require('./bluenoise');
 
 const STRIP_PIXELS = 1000000;
 const BASE_MAX_PIXELS = 6000000;  // memory cap for the base grid (design 5.7: <= 400 MB)
-const FULL_RES_MAX = 4000000;     // up to this size the base grid is full resolution
+// Up to this size the base grid is full resolution. Code review: 3 Mpx took 12.3 s at full
+// resolution vs 6.7 s at base level 1, with at most 3 codes of difference.
+const FULL_RES_MAX = 1000000;
 
 // Dither tile offsets per channel (design 5.4).
 const NDX = [0, 23, 41];

@@ -33,6 +33,8 @@ function createFakePhotoshop(opts = {}) {
     progress: [],
     suspend: [],
     resume: [],
+    visibility: [],
+    history: [], // committed history steps: { name, before: snapshot }
     rollbacks: 0,
     commits: 0,
   };
@@ -72,7 +74,7 @@ function createFakePhotoshop(opts = {}) {
       blendMode: spec.blendMode || "normal",
       isClippingMask: !!spec.isClippingMask,
       isBackgroundLayer: !!spec.isBackground,
-      visible: true,
+      _visible: spec.visible !== false,
       _opaque: !!spec.opaque,
       _hasUserMask: !!spec.hasUserMask,
       _store: new Uint8Array(W * H * 4),
@@ -97,15 +99,30 @@ function createFakePhotoshop(opts = {}) {
       },
     });
     Object.defineProperty(layer, "bounds", { get() { return layer.boundsNoEffects; } });
+    Object.defineProperty(layer, "visible", {
+      get() {
+        return layer._visible;
+      },
+      set(v) {
+        guard("visible");
+        if (!modal.active) throw new Error("setting visible requires a modal scope");
+        log.visibility.push({ id: layer.id, visible: !!v });
+        layer._visible = !!v;
+      },
+    });
+    // Like Layer.move: placeBefore = directly above rel, placeAfter = directly below.
+    // A move that leaves the layer where it was is logged with noop: true.
     layer.move = async (rel, placement) => {
       guard("move");
       if (!modal.active) throw new Error("move requires a modal scope");
-      log.moves.push({ id: layer.id, rel: rel.id, placement });
+      if (!rel || rel === layer || rel.id === layer.id) throw new Error("move: invalid relative layer");
+      const before = doc.layers.map((l) => l.id).join(",");
       const from = doc.layers.indexOf(layer);
       if (from >= 0) doc.layers.splice(from, 1);
       const to = doc.layers.indexOf(rel);
       if (to < 0) throw new Error("relative layer not found");
       doc.layers.splice(placement === constants.ElementPlacement.PLACEBEFORE ? to : to + 1, 0, layer);
+      log.moves.push({ id: layer.id, rel: rel.id, placement, noop: before === doc.layers.map((l) => l.id).join(",") });
     };
     layer.delete = async () => {
       guard("delete");
@@ -159,7 +176,7 @@ function createFakePhotoshop(opts = {}) {
     const out = new Uint8Array(W * H * 4);
     for (let i = doc.layers.length - 1; i >= 0; i--) {
       const l = doc.layers[i];
-      if (!l.visible) continue;
+      if (!l._visible) continue;
       const s = l._store;
       for (let p = 0; p < W * H * 4; p += 4) {
         const a = s[p + 3] / 255;
@@ -199,7 +216,9 @@ function createFakePhotoshop(opts = {}) {
   const imaging = {
     async getPixels(o) {
       guard("getPixels");
-      log.getPixels.push(JSON.parse(JSON.stringify(o)));
+      const entry = JSON.parse(JSON.stringify(o));
+      entry.visibleLayers = doc.layers.filter((l) => l._visible).map((l) => l.id);
+      log.getPixels.push(entry);
       const docR = { left: 0, top: 0, right: W, bottom: H };
       const sb = o.sourceBounds || docR;
       const req = {
@@ -208,6 +227,10 @@ function createFakePhotoshop(opts = {}) {
         right: Math.min(W, sb.right),
         bottom: Math.min(H, sb.bottom),
       };
+      // failGetPixels(request, callNumber): true injects a read error, "empty" an empty answer
+      const injected = opts.failGetPixels ? opts.failGetPixels(req, log.getPixels.length) : false;
+      if (injected === "empty") return { imageData: null, sourceBounds: { left: req.left, top: req.top, right: req.left, bottom: req.top }, level: 0 };
+      if (injected) throw new Error("getPixels failed (injected)");
       let store, opaque;
       if (o.layerID !== undefined) {
         const l = findLayer(o.layerID);
@@ -298,6 +321,7 @@ function createFakePhotoshop(opts = {}) {
     return {
       order: doc.layers.slice(),
       stores: new Map(doc.layers.map((l) => [l, l._store.slice()])),
+      visible: new Map(doc.layers.map((l) => [l, l._visible])),
       active: doc._active.slice(),
     };
   }
@@ -305,10 +329,11 @@ function createFakePhotoshop(opts = {}) {
   function restore(s) {
     doc.layers.length = 0;
     for (const l of s.order) {
-      l._store = s.stores.get(l);
+      l._store = s.stores.get(l).slice();
+      l._visible = s.visible.get(l);
       doc.layers.push(l);
     }
-    doc._active = s.active;
+    doc._active = s.active.slice();
   }
 
   const psCore = {
@@ -319,6 +344,8 @@ function createFakePhotoshop(opts = {}) {
       const snap = snapshot();
       modal.active = true;
       modal.cancelled = false;
+      const suspended = new Map();
+      let committedStep = null;
       const ctx = {
         get isCancelled() {
           return modal.cancelled;
@@ -330,16 +357,25 @@ function createFakePhotoshop(opts = {}) {
         hostControl: {
           async suspendHistory(o) {
             log.suspend.push(o);
-            return 4242;
+            const id = 4242 + log.suspend.length - 1;
+            suspended.set(id, { name: o.name, before: snapshot() });
+            return id;
           },
+          // commit false: the document goes back to the suspended state, no history step
           async resumeHistory(id, commit) {
             log.resume.push({ id, commit });
+            const s = suspended.get(id);
+            if (!s) throw new Error("resumeHistory: unknown suspension " + id);
+            suspended.delete(id);
+            if (commit === false) restore(s.before);
+            else committedStep = s;
           },
         },
       };
       try {
         const r = await fn(ctx);
         log.commits++;
+        if (committedStep) log.history.push(committedStep);
         return r;
       } catch (e) {
         restore(snap);
@@ -399,6 +435,7 @@ function createFakePhotoshop(opts = {}) {
     photoshop: { app, core: psCore, action, imaging, constants },
     doc,
     log,
+    opts, // options are read at call time, so a test may change them midway
     makeLayer,
     findLayer,
     fire(name, desc) {
@@ -406,6 +443,13 @@ function createFakePhotoshop(opts = {}) {
     },
     cancelNow() {
       modal.cancelled = true;
+    },
+    // Edit > Undo of the last committed history step: layers come back with their IDs.
+    undo() {
+      const step = log.history.pop();
+      if (!step) throw new Error("nothing to undo");
+      restore(step.before);
+      return step.name;
     },
   };
 }

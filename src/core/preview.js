@@ -8,6 +8,9 @@ const { NOISE } = require('./bluenoise');
 
 const NDX = [0, 23, 41];
 const NDY = [0, 37, 11];
+const ALPHA_TAB = new Float32Array(256);
+for (let i = 0; i < 256; i++) ALPHA_TAB[i] = i / 255;
+const SRGB_AUX = T.lutAux(T.SRGB_LUT);
 
 function createPreviewBuilder(opts) {
   const width = opts.width | 0;
@@ -36,6 +39,8 @@ function createPreviewBuilder(opts) {
     width: pw,
     height: ph,
     block,
+    // Every statistic is weighted by the pixel's alpha (the halo source is L * alpha), so a
+    // transparent pixel never contributes light, whatever RGB it carries.
     push(data, comps, y0, rows) {
       const hasAlpha = comps === 4;
       for (let ry = 0; ry < rows; ry++) {
@@ -47,19 +52,23 @@ function createPreviewBuilder(opts) {
           const bi = prow + PX[x];
           const b3 = bi * 3;
           cnt[bi] += 1;
+          let a = 1;
           if (hasAlpha) {
             const al = data[p + 3];
             if (al < 255) anyAlpha = true;
-            asum[bi] += al;
-          } else {
-            asum[bi] += 255;
+            a = ALPHA_TAB[al];
           }
-          const v0 = data[p];
-          const v1 = data[p + 1];
-          const v2 = data[p + 2];
-          if (v0 === 255) { c255[b3] += 1; dx255[b3] += DX[x]; dy255[b3] += dy; } else sum[b3] += lut[v0];
-          if (v1 === 255) { c255[b3 + 1] += 1; dx255[b3 + 1] += DX[x]; dy255[b3 + 1] += dy; } else sum[b3 + 1] += lut[v1];
-          if (v2 === 255) { c255[b3 + 2] += 1; dx255[b3 + 2] += DX[x]; dy255[b3 + 2] += dy; } else sum[b3 + 2] += lut[v2];
+          asum[bi] += a;
+          if (a > 0) {
+            const v0 = data[p];
+            const v1 = data[p + 1];
+            const v2 = data[p + 2];
+            const dxa = a * DX[x];
+            const dya = a * dy;
+            if (v0 === 255) { c255[b3] += a; dx255[b3] += dxa; dy255[b3] += dya; } else sum[b3] += a * lut[v0];
+            if (v1 === 255) { c255[b3 + 1] += a; dx255[b3 + 1] += dxa; dy255[b3 + 1] += dya; } else sum[b3 + 1] += a * lut[v1];
+            if (v2 === 255) { c255[b3 + 2] += a; dx255[b3 + 2] += dxa; dy255[b3 + 2] += dya; } else sum[b3 + 2] += a * lut[v2];
+          }
           p += comps;
         }
       }
@@ -72,12 +81,13 @@ function createPreviewBuilder(opts) {
       const alpha = anyAlpha ? new Float32Array(n) : null;
       for (let i = 0; i < n; i++) {
         const k = cnt[i] || 1;
-        if (alpha) alpha[i] = asum[i] / (255 * k);
+        const aw = asum[i]; // total alpha weight of the block
+        if (alpha) alpha[i] = aw / k;
         for (let c = 0; c < 3; c++) {
           const j = i * 3 + c;
-          const f = c255[j] / k;
-          const rest = k - c255[j];
-          const m = rest > 0 ? sum[j] / rest : 0;
+          const f = aw > 0 ? c255[j] / aw : 0;
+          const rest = aw - c255[j];
+          const m = rest > 1e-12 ? sum[j] / rest : 0;
           f255[j] = f;
           mean[j] = m;
           if (c255[j] > 0) {
@@ -153,14 +163,20 @@ function downscaleProxy(p) {
 }
 
 // Linear light of the proxy for the current curve: L = f255 + (1 - f255) * LUT_in[code(M)].
+// Returns { L, Lrest }: L is the block's mean light for the curve, Lrest the light of its
+// non-255 part (needed to display the block as the average of what its pixels would show).
 function proxyLinear(proxy, settings, lut) {
   const n = proxy.width * proxy.height * 3;
   const L = new Float32Array(n);
+  const Lrest = new Float32Array(n);
   const f = proxy.f255;
   const m = proxy.mean;
   if (settings.mode === 'srgb') {
-    for (let i = 0; i < n; i++) L[i] = f[i] + (1 - f[i]) * m[i];
-    return L;
+    for (let i = 0; i < n; i++) {
+      Lrest[i] = m[i];
+      L[i] = f[i] + (1 - f[i]) * m[i];
+    }
+    return { L, Lrest };
   }
   const inv = T.srgbInverseTable();
   const N = T.SRGB_INV_N;
@@ -171,9 +187,26 @@ function proxyLinear(proxy, settings, lut) {
     const ci = code >= 255 ? 254 : code | 0;
     const cf = code - ci;
     const lin = lut[ci] + cf * (lut[ci + 1] - lut[ci]);
+    Lrest[i] = lin;
     L[i] = f[i] + (1 - f[i]) * lin;
   }
-  return L;
+  return { L, Lrest };
+}
+
+// Curve light -> displayed (sRGB-linear) light of the dithered 8-bit output: the output mixes
+// codes c and c+1 with probability t in curve light, so its mean display light is the lerp.
+function displayLight(lut, R, v) {
+  if (v >= 1) return 1;
+  if (v <= 0) return 0;
+  let lo = 0;
+  let hi = 255;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (lut[mid] <= v) lo = mid;
+    else hi = mid;
+  }
+  const t = (v - lut[lo]) * R[lo];
+  return T.SRGB_LUT[lo] + t * (T.SRGB_LUT[lo + 1] - T.SRGB_LUT[lo]);
 }
 
 // 1D splat weights at proxy offsets (-1, 0, +1) with mean o and variance max(v, bilinear).
@@ -216,7 +249,8 @@ function previewFields(proxy, settings, opts) {
   const s = phys.s;
   const lut = S.buildLutIn(s);
   const aux = T.lutAux(lut);
-  const L = proxyLinear(proxy, s, lut);
+  const lin = proxyLinear(proxy, s, lut);
+  const L = lin.L;
   const n = w * h;
   // Halo source: the 255-part of each block (light sources) is splatted bilinearly at its
   // sub-block centroid, so a small lamp's halo is centred where the lamp really is.
@@ -254,7 +288,7 @@ function previewFields(proxy, settings, opts) {
   }
   const docLongSide = o.docLongSide > 0 ? o.docLongSide : Math.max(proxy.srcWidth, proxy.srcHeight);
   const field = phys.A === 0 ? src : H.runToEnd(H.haloForChannels(src, w, h, S.kernelGaussians(s, docLongSide, 1 / proxy.block)));
-  return { phys, lut, aux, L, field };
+  return { phys, lut, aux, L, Lrest: lin.Lrest, field };
 }
 
 function renderPreview(fullProxy, settings, view, opts) {
@@ -270,15 +304,40 @@ function renderPreview(fullProxy, settings, view, opts) {
   if (view === 'before') {
     out.set(proxy.before);
   } else {
-    const { phys, lut, aux, L, field } = previewFields(proxy, settings, opts);
+    // Each proxy pixel stands for a block: its non-255 part and its 255 part (sources) are
+    // processed separately, turned into display light through the curve, and mixed in display
+    // light. Mixing in curve light would let a thin white line (1/12 of a block) brighten the
+    // whole block to white under a curve with a jump.
+    const { phys, lut, aux, Lrest, field } = previewFields(proxy, settings, opts);
+    const f = proxy.f255;
+    const ex = phys.excess;
+    const halo = view === 'halo';
+    const srgb = phys.s.mode === 'srgb';
+    const R = aux.R;
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         const i = y * w + x;
         for (let c = 0; c < 3; c++) {
           const j = i * 3 + c;
-          const v = view === 'halo' ? S.haloOnly(phys, c, L[j], field[j]) : S.combine(phys, c, L[j], field[j]);
+          const a = phys.a[c];
+          const inv = phys.inv[c];
+          const hv = field[j];
+          const lr = Lrest[j];
+          let e = hv - lr;
+          let o;
+          if (halo) o = ex ? (e > 0 ? a * e : 0) : a * hv * inv;
+          else o = ex ? (e > 0 ? lr + a * e : lr) : (lr + a * hv) * inv;
+          let disp = srgb ? (o >= 1 ? 1 : o <= 0 ? 0 : o) : displayLight(lut, R, o);
+          const fj = f[j];
+          if (fj > 0) {
+            e = hv - 1; // the 255 part has linear light 1 for every curve
+            if (halo) o = ex ? (e > 0 ? a * e : 0) : a * hv * inv;
+            else o = ex ? (e > 0 ? 1 + a * e : 1) : (1 + a * hv) * inv;
+            const d255 = srgb ? (o >= 1 ? 1 : o <= 0 ? 0 : o) : displayLight(lut, R, o);
+            disp = fj * d255 + (1 - fj) * disp;
+          }
           const noise = NOISE[(((y + NDY[c]) & 63) << 6) + ((x + NDX[c]) & 63)];
-          out[j] = encode(lut, aux.R, v, noise);
+          out[j] = encode(T.SRGB_LUT, SRGB_AUX.R, disp, noise);
         }
       }
     }

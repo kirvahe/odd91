@@ -220,13 +220,21 @@ test("panel: show builds the preview, sliders render draft then full, apply runs
   assert.ok(dom["reinhard-section"].classList.contains("is-hidden"));
 
   // apply
+  const realModal = fake.photoshop.core.executeAsModal;
+  let applyCalls = 0;
+  fake.photoshop.core.executeAsModal = (fn, o) => {
+    if (o.commandName === "Halation") applyCalls++;
+    return realModal(fn, o);
+  };
   dom["btn-apply"].dispatch("click");
+  dom["btn-apply"].dispatch("click"); // double click: must not start a second modal (review М1)
   await waitFor(() => /Готово/.test(dom.status.textContent) || /Ошибка/.test(dom.status.textContent), "apply result");
   assert.match(dom.status.textContent, /Готово/);
   const result = fake.doc.layers.find((l) => l.name === "Halation");
   assert.ok(result, "result layer created");
   assert.deepEqual(fake.doc._active, [1]);
   assert.equal(fake.log.modal.at(-1).commandName, "Halation");
+  assert.equal(applyCalls, 1, "one executeAsModal call for a double click");
   assert.equal(dom["btn-apply"].textContent, "Применить");
   assert.ok(!dom["btn-apply"].hasAttribute("disabled"));
 
