@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Halation: установка</title>
+<style>
+  :root {
+    --bg: #f6f4f1; --card: #ffffff; --ink: #1c1b19; --muted: #6a665f; --line: #e2ded7;
+    --accent: #c95418; --accent-soft: #fbe9de; --ok: #2f7d4a; --ok-soft: #e3f3e8; --bad: #b3372e; --bad-soft: #f8e1df;
+    --code: #f0ede8; --ps: #2b2b2b; --ps-ink: #d6d6d6; --ps-line: #3c3c3c; --ps-field: #1f1f1f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #151413; --card: #1f1e1c; --ink: #edebe7; --muted: #a29e96; --line: #33312e;
+      --accent: #ff8a4c; --accent-soft: #3a2418; --ok: #5cc27e; --ok-soft: #1c3124; --bad: #ff7b70; --bad-soft: #3a1e1c; --code: #2a2826;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #151413; --card: #1f1e1c; --ink: #edebe7; --muted: #a29e96; --line: #33312e;
+    --accent: #ff8a4c; --accent-soft: #3a2418; --ok: #5cc27e; --ok-soft: #1c3124; --bad: #ff7b70; --bad-soft: #3a1e1c; --code: #2a2826;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 17px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 28px 16px 64px; }
+  h1 { font-size: 30px; line-height: 1.2; margin: 0 0 6px; letter-spacing: -0.01em; }
+  h2 { font-size: 23px; margin: 44px 0 14px; }
+  h3 { font-size: 18px; margin: 0 0 6px; }
+  p { margin: 0 0 10px; }
+  .lead { color: var(--muted); margin-bottom: 20px; }
+  a { color: var(--accent); }
+  code, .path { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.88em; background: var(--code); padding: 2px 6px; border-radius: 5px; word-break: break-all; }
+  .toc { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 6px; }
+  .toc a { text-decoration: none; border: 1px solid var(--line); background: var(--card); color: var(--ink); padding: 6px 12px; border-radius: 999px; font-size: 15px; }
+  .need { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+  .need div { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+  .need b { display: block; }
+  .tabs { display: inline-flex; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 4px; gap: 4px; margin: 4px 0 18px; }
+  .tabs button { font: inherit; font-weight: 600; border: 0; background: transparent; color: var(--muted); padding: 8px 18px; border-radius: 9px; cursor: pointer; }
+  .tabs button[aria-selected="true"] { background: var(--accent); color: #fff; }
+  .os { display: none; }
+  .os.on { display: block; }
+  .step { display: grid; grid-template-columns: 44px 1fr; gap: 14px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin: 0 0 12px; }
+  .num { width: 40px; height: 40px; border-radius: 50%; background: var(--accent); color: #fff; font-weight: 700; display: grid; place-items: center; font-size: 19px; }
+  .step .body > *:last-child { margin-bottom: 0; }
+  .click { display: inline-block; font-weight: 600; border: 1px solid var(--line); background: var(--bg); border-radius: 7px; padding: 1px 8px; white-space: nowrap; }
+  .arrow { color: var(--muted); padding: 0 4px; }
+  .pathbox { display: flex; gap: 8px; align-items: stretch; margin: 8px 0; flex-wrap: wrap; }
+  .pathbox .path { flex: 1 1 260px; padding: 10px 12px; display: block; }
+  .copy { font: inherit; font-size: 14px; font-weight: 600; border: 1px solid var(--accent); color: var(--accent); background: transparent; border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+  .copy.done { background: var(--ok); border-color: var(--ok); color: #fff; }
+  .note { border-left: 4px solid var(--accent); background: var(--accent-soft); padding: 10px 14px; border-radius: 0 10px 10px 0; margin: 10px 0; }
+  .trees { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin-top: 8px; }
+  .tree { border-radius: 12px; padding: 12px 14px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 14px; line-height: 1.7; white-space: pre; overflow-x: auto; }
+  .tree.good { background: var(--ok-soft); border: 1px solid var(--ok); }
+  .tree.bad { background: var(--bad-soft); border: 1px solid var(--bad); }
+  .tree .t { font-family: -apple-system, system-ui, sans-serif; font-weight: 700; display: block; margin-bottom: 4px; white-space: normal; }
+  .good .t { color: var(--ok); }
+  .bad .t { color: var(--bad); }
+
+  /* Photoshop-like panel sketch */
+  .panelwrap { display: grid; grid-template-columns: minmax(260px, 330px) 1fr; gap: 18px; align-items: start; }
+  @media (max-width: 720px) { .panelwrap { grid-template-columns: 1fr; } }
+  .ps { background: var(--ps); color: var(--ps-ink); border-radius: 10px; border: 1px solid #111; font: 13px/1.35 -apple-system, system-ui, sans-serif; overflow: hidden; box-shadow: 0 8px 24px rgba(0,0,0,.18); }
+  .ps .bar { background: #3a3a3a; padding: 6px 10px; font-weight: 600; font-size: 12px; letter-spacing: .02em; display: flex; justify-content: space-between; }
+  .ps .in { padding: 10px 38px 10px 12px; display: flex; flex-direction: column; gap: 9px; }
+  .ps .r { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; position: relative; }
+  .ps .lab { color: #a9a9a9; min-width: 64px; }
+  .ps .rad { display: inline-flex; align-items: center; gap: 4px; margin-right: 6px; }
+  .ps .rad i { width: 11px; height: 11px; border-radius: 50%; border: 2px solid #9a9a9a; display: inline-block; }
+  .ps .rad.on i { border-color: #4a90e2; background: radial-gradient(circle, #4a90e2 0 40%, transparent 45%); }
+  .ps .sw { width: 34px; height: 16px; border-radius: 3px; background: #ff9027; border: 1px solid #111; }
+  .ps .sl { flex: 1; height: 4px; background: #555; border-radius: 2px; position: relative; min-width: 90px; }
+  .ps .sl b { position: absolute; top: -5px; width: 13px; height: 13px; border-radius: 50%; background: #e6e6e6; }
+  .ps .val { color: #cfcfcf; min-width: 34px; text-align: right; font-variant-numeric: tabular-nums; }
+  .ps .prev { height: 120px; border-radius: 4px; background: #111; position: relative; overflow: hidden; }
+  .ps .prev span { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: #fff; box-shadow: 0 0 10px 6px rgba(255,140,40,.75), 0 0 26px 14px rgba(255,90,20,.35); }
+  .ps .seg { display: inline-flex; border: 1px solid #555; border-radius: 4px; overflow: hidden; }
+  .ps .seg em { font-style: normal; padding: 2px 8px; color: #bbb; }
+  .ps .seg em.on { background: #4a4a4a; color: #fff; }
+  .ps .btn { background: #1473e6; color: #fff; text-align: center; border-radius: 14px; padding: 6px 0; font-weight: 600; }
+  .ps .small { background: #3e3e3e; border: 1px solid #555; border-radius: 4px; padding: 1px 8px; }
+  .badge { position: absolute; right: -32px; top: 50%; margin-top: -11px; width: 22px; height: 22px; border-radius: 50%; background: var(--accent); color: #fff; font: 700 12px/22px -apple-system, system-ui, sans-serif; text-align: center; box-shadow: 0 0 0 2px var(--ps); }
+  .legend { list-style: none; padding: 0; margin: 0; counter-reset: n; }
+  .legend li { position: relative; padding: 0 0 12px 36px; }
+  .legend li::before { counter-increment: n; content: counter(n); position: absolute; left: 0; top: 1px; width: 24px; height: 24px; border-radius: 50%; background: var(--accent); color: #fff; font-weight: 700; font-size: 13px; display: grid; place-items: center; }
+  .recipe { background: var(--card); border: 2px solid var(--accent); border-radius: 14px; padding: 16px 18px; }
+  .recipe ol { margin: 6px 0 0; padding-left: 22px; }
+  .faq details { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px; margin-bottom: 8px; }
+  .faq summary { cursor: pointer; font-weight: 600; }
+  .faq details[open] summary { margin-bottom: 8px; }
+  .menu { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+  footer { color: var(--muted); font-size: 14px; margin-top: 48px; border-top: 1px solid var(--line); padding-top: 14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Halation для Photoshop</h1>
+  <p class="lead">Плагин делает плёночное свечение вокруг ярких мест. Ниже — пошагово, что скачать, куда положить и куда нажимать. Всё займёт минут пять.</p>
+
+  <nav class="toc">
+    <a href="#need">Что нужно</a>
+    <a href="#install">Установка</a>
+    <a href="#use">Как пользоваться</a>
+    <a href="#recipe">Быстрый рецепт</a>
+    <a href="#lamps">Лампы ярче</a>
+    <a href="#trouble">Не работает</a>
+    <a href="#update">Обновить или удалить</a>
+  </nav>
+
+  <h2 id="need">Что нужно</h2>
+  <div class="need">
+    <div><b>Photoshop 2023 или новее</b>Версия 24.4 и выше. Creative Cloud не нужен.</div>
+    <div><b>Mac или Windows</b>Подходят оба.</div>
+    <div><b>Пароль от компьютера</b>Система спросит его, когда будешь класть плагин в папку Photoshop.</div>
+  </div>
+
+  <h2 id="install">Установка</h2>
+  <div class="tabs" role="tablist">
+    <button role="tab" data-os="mac" aria-selected="true">Mac</button>
+    <button role="tab" data-os="win" aria-selected="false">Windows</button>
+  </div>
+
+  <!-- ===================== MAC ===================== -->
+  <section class="os on" data-os="mac">
+    <div class="step"><div class="num">1</div><div class="body">
+      <h3>Закрой Photoshop</h3>
+      <p>Полностью: <span class="click">Photoshop</span><span class="arrow">→</span><span class="click">Завершить Photoshop</span> (или <code>⌘ Q</code>).</p>
+    </div></div>
+
+    <div class="step"><div class="num">2</div><div class="body">
+      <h3>Скачай и распакуй</h3>
+      <p>Скачай архив <code>odd91-halation.zip</code> со страницы <a href="https://github.com/kirvahe/odd91/releases/latest">github.com/kirvahe/odd91/releases</a> (раздел <b>Assets</b>).</p>
+      <p>Дважды щёлкни по архиву. Рядом появится папка, а в ней — папка <code>dev.halation.photoshop</code>. Её мы и будем ставить.</p>
+    </div></div>
+
+    <div class="step"><div class="num">3</div><div class="body">
+      <h3>Открой папку плагинов Photoshop</h3>
+      <p>В Finder нажми <span class="click">Переход</span><span class="arrow">→</span><span class="click">Переход к папке…</span> (или <code>⇧ ⌘ G</code>), вставь путь и нажми <span class="click">Return</span>:</p>
+      <div class="pathbox"><span class="path">/Applications/</span><button class="copy" data-copy="/Applications/">Скопировать</button></div>
+      <p>Открой папку <b>Adobe Photoshop 2026</b> (или 2025, 2024 — какая у тебя), а в ней — папку <b>Plug-ins</b>.</p>
+    </div></div>
+
+    <div class="step"><div class="num">4</div><div class="body">
+      <h3>Перетащи папку плагина внутрь Plug-ins</h3>
+      <p>Перетащи <code>dev.halation.photoshop</code> мышкой в окно с <b>Plug-ins</b>. Mac попросит пароль — введи пароль от компьютера и нажми <span class="click">ОК</span>.</p>
+      <div class="trees">
+        <div class="tree good"><span class="t">✓ Правильно</span>Plug-ins/
+└─ dev.halation.photoshop/
+   ├─ manifest.json
+   ├─ index.html
+   └─ …</div>
+        <div class="tree bad"><span class="t">✗ Неправильно — лишняя папка</span>Plug-ins/
+└─ odd91-halation/
+   └─ dev.halation.photoshop/
+      └─ manifest.json</div>
+      </div>
+      <p class="note">Главное правило: открываешь <b>Plug-ins</b> → <b>dev.halation.photoshop</b> — и сразу видишь файл <code>manifest.json</code>. Если сначала ещё какая-то папка — плагин не появится.</p>
+    </div></div>
+
+    <div class="step"><div class="num">5</div><div class="body">
+      <h3>Запусти Photoshop и открой панель</h3>
+      <p>Открой любую фотографию, затем в меню: <span class="menu"><span class="click">Плагины</span><span class="arrow">→</span><span class="click">Halation</span><span class="arrow">→</span><span class="click">Halation</span></span>. В английском Photoshop меню называется <b>Plugins</b>.</p>
+      <p>Появится панель плагина. Её можно перетащить к другим панелям справа.</p>
+    </div></div>
+  </section>
+
+  <!-- ===================== WINDOWS ===================== -->
+  <section class="os" data-os="win">
+    <div class="step"><div class="num">1</div><div class="body">
+      <h3>Закрой Photoshop</h3>
+      <p>Полностью: <span class="click">Файл</span><span class="arrow">→</span><span class="click">Выход</span> (или <code>Ctrl Q</code>).</p>
+    </div></div>
+
+    <div class="step"><div class="num">2</div><div class="body">
+      <h3>Скачай и распакуй</h3>
+      <p>Скачай архив <code>odd91-halation.zip</code> со страницы <a href="https://github.com/kirvahe/odd91/releases/latest">github.com/kirvahe/odd91/releases</a> (раздел <b>Assets</b>).</p>
+      <p>Щёлкни по архиву правой кнопкой <span class="arrow">→</span> <span class="click">Извлечь всё…</span> <span class="arrow">→</span> <span class="click">Извлечь</span>. Внутри будет папка <code>dev.halation.photoshop</code>.</p>
+    </div></div>
+
+    <div class="step"><div class="num">3</div><div class="body">
+      <h3>Открой папку плагинов Photoshop</h3>
+      <p>Открой Проводник, щёлкни в адресную строку сверху, вставь путь и нажми <span class="click">Enter</span>:</p>
+      <div class="pathbox"><span class="path">C:\Program Files\Adobe\</span><button class="copy" data-copy="C:\Program Files\Adobe\">Скопировать</button></div>
+      <p>Открой папку <b>Adobe Photoshop 2026</b> (или 2025, 2024 — какая у тебя), а в ней — папку <b>Plug-ins</b>.</p>
+    </div></div>
+
+    <div class="step"><div class="num">4</div><div class="body">
+      <h3>Перетащи папку плагина внутрь Plug-ins</h3>
+      <p>Перетащи <code>dev.halation.photoshop</code> в окно с <b>Plug-ins</b>. Windows спросит разрешение — нажми <span class="click">Продолжить</span>.</p>
+      <div class="trees">
+        <div class="tree good"><span class="t">✓ Правильно</span>Plug-ins\
+└─ dev.halation.photoshop\
+   ├─ manifest.json
+   ├─ index.html
+   └─ …</div>
+        <div class="tree bad"><span class="t">✗ Неправильно — лишняя папка</span>Plug-ins\
+└─ odd91-halation\
+   └─ dev.halation.photoshop\
+      └─ manifest.json</div>
+      </div>
+      <p class="note">Главное правило: открываешь <b>Plug-ins</b> → <b>dev.halation.photoshop</b> — и сразу видишь файл <code>manifest.json</code>. Если сначала ещё какая-то папка — плагин не появится.</p>
+    </div></div>
+
+    <div class="step"><div class="num">5</div><div class="body">
+      <h3>Запусти Photoshop и открой панель</h3>
+      <p>Открой любую фотографию, затем в меню: <span class="menu"><span class="click">Плагины</span><span class="arrow">→</span><span class="click">Halation</span><span class="arrow">→</span><span class="click">Halation</span></span>. В английском Photoshop меню называется <b>Plugins</b>.</p>
+    </div></div>
+  </section>
+
+  <h2 id="use">Как пользоваться</h2>
+  <p>Так выглядит панель. Цифры — куда смотреть и нажимать.</p>
+  <div class="panelwrap">
+    <div class="ps" aria-label="Схема панели плагина">
+      <div class="bar"><span>HALATION</span><span>≡</span></div>
+      <div class="in">
+        <div class="r"><span class="lab">Режим:</span><span class="rad"><i></i>sRGB</span><span class="rad"><i></i>Своя кривая</span><span class="rad on"><i></i>8 бит → scene-linear</span><span class="badge">1</span></div>
+        <div class="r"><span class="lab">Limit</span><span class="sl"><b style="left:38%"></b></span><span class="val">1.10</span></div>
+        <div class="r"><span class="lab">Метод:</span><span class="rad on"><i></i>Без каймы</span><span class="rad"><i></i>Proosa</span><span class="badge">2</span></div>
+        <div class="r"><span class="lab">Цвет:</span><span class="sw"></span><span class="small">Выбрать…</span><span class="badge">3</span></div>
+        <div class="r"><span class="lab">Размытие</span><span class="sl"><b style="left:48%"></b></span><span class="val">×1.00</span><span class="badge">4</span></div>
+        <div class="r"><span class="lab">Сила</span><span class="sl"><b style="left:28%"></b></span><span class="val">30</span><span class="badge">5</span></div>
+        <div class="r" style="display:block"><div class="prev"><span style="left:28%;top:30%"></span><span style="left:62%;top:55%"></span><span style="left:45%;top:75%"></span></div><span class="badge">6</span></div>
+        <div class="r"><span class="seg"><em>До</em><em class="on">После</em><em>Только ореол</em></span><span class="small">Обновить</span></div>
+        <div class="r"><span class="rad on"><i style="border-radius:3px"></i>Заменять прежний результат</span></div>
+        <div class="r" style="display:block"><div class="btn">Применить</div><span class="badge">7</span></div>
+        <div class="r" style="color:#9a9a9a">▸ Диагностика</div>
+      </div>
+    </div>
+    <ol class="legend">
+      <li><b>Режим.</b> Как плагин понимает яркость картинки. Ставь <b>8 бит → scene-linear</b> — так лампы и блики светятся сильнее остального, как на плёнке. Ползунок <b>Limit</b> под ним: меньше — сильнее выделяются самые яркие места.</li>
+      <li><b>Метод.</b> Оставь <b>Без каймы</b>. «Proosa» — как в видео-плагине hotgluebanjo, но на светлых краях может дать голубоватую кайму.</li>
+      <li><b>Цвет свечения.</b> Нажми на квадратик — откроется палитра Photoshop. По умолчанию тёплый оранжевый, как у плёнки.</li>
+      <li><b>Размытие</b> — насколько широко расходится свечение. Не зависит от размера файла.</li>
+      <li><b>Сила</b> — насколько ярко светится. 30 — спокойно, 50–70 — заметно, 100 — максимум.</li>
+      <li><b>Предпросмотр.</b> Переключай <b>До / После / Только ореол</b>. Пока тянешь ползунок, картинка грубее — через полсекунды станет чёткой. Если поменял слой или документ, нажми <b>Обновить</b>.</li>
+      <li><b>Применить.</b> Плагин создаст новый слой <b>«Halation»</b> над твоим. Сам снимок не трогается. На большой фотографии это займёт до минуты — внизу Photoshop будет полоска прогресса, отменить можно клавишей <code>Esc</code>.</li>
+    </ol>
+  </div>
+
+  <h2 id="recipe">Быстрый рецепт</h2>
+  <div class="recipe">
+    <b>Хочу «как на плёнке» за 10 секунд:</b>
+    <ol>
+      <li>Выбери слой с фотографией (в панели Слои).</li>
+      <li>Режим — <b>8 бит → scene-linear</b>, Метод — <b>Без каймы</b>.</li>
+      <li>Сила — <b>40</b>, Размытие — как нравится в предпросмотре.</li>
+      <li>Нажми <b>Применить</b>. Не понравилось — <code>⌘ Z</code> / <code>Ctrl Z</code>, поменяй ползунки, нажми ещё раз.</li>
+    </ol>
+  </div>
+  <p class="note">Галочка <b>«Заменять прежний результат»</b> означает: при повторном нажатии старый слой «Halation» заменится новым, а не ляжет сверху ещё одним.</p>
+
+  <h2 id="lamps">Если хочется, чтобы светились только лампы</h2>
+  <p>В обычной 8-битной картинке лампа и белая стена одинаково белые (255), поэтому плагин может считать их одинаково яркими. Есть два способа это исправить:</p>
+  <div class="step"><div class="num">А</div><div class="body">
+    <h3>Просто — режим «8 бит → scene-linear»</h3>
+    <p>Чем ближе цвет к чисто белому, тем сильнее светится. Двигай <b>Limit</b> к 1.01, чтобы светились только самые-самые яркие места.</p>
+  </div></div>
+  <div class="step"><div class="num">Б</div><div class="body">
+    <h3>Точно — «Своя кривая», если белое (255) стоит только на лампах</h3>
+    <ol>
+      <li>Режим — <b>Своя кривая</b>.</li>
+      <li>Щёлкни по графику, чтобы добавить точку, и впиши в поля: <b>X = 254</b>, <b>Y = 0.991102</b>.</li>
+      <li>В поле <b>k</b> впиши <b>0.0333</b> и нажми <span class="click">×k</span>. Теперь лампы в 30 раз ярче всего остального.</li>
+      <li>Чтобы видеть всю кривую, переключи <b>Ось Y</b> на <b>лог</b>.</li>
+    </ol>
+    <p class="note">Белое должно быть белым во <b>всех трёх</b> каналах (255, 255, 255). Тёплая лампа вроде 255, 250, 236 засветится только красным. Красное платье с красным 255 тоже засветится, как лампа.</p>
+  </div></div>
+
+  <h2 id="trouble">Если не работает</h2>
+  <div class="faq">
+    <details><summary>В меню «Плагины» нет пункта Halation</summary>
+      <p>1) Перезапусти Photoshop. 2) Проверь папку: <b>Plug-ins</b> → <b>dev.halation.photoshop</b> → внутри сразу <code>manifest.json</code> (смотри картинку «Правильно» выше). 3) Проверь версию: <span class="click">Справка</span><span class="arrow">→</span><span class="click">О программе Photoshop</span> — нужна 24.4 или новее.</p>
+    </details>
+    <details><summary>Плагин пишет, что документ не подходит</summary>
+      <p>Нужен режим <b>RGB</b> и <b>8 бит/канал</b>: <span class="click">Изображение</span><span class="arrow">→</span><span class="click">Режим</span><span class="arrow">→</span><span class="click">RGB</span> и <span class="click">8 бит/канал</span>.</p>
+    </details>
+    <details><summary>Предлагает «применить к видимому изображению»</summary>
+      <p>Так бывает, если выбран смарт-объект, текст или у слоя есть маска. Можно согласиться — свечение посчитается по всему видимому изображению и ляжет новым слоем сверху. Или растрируй слой: правой кнопкой по слою → <span class="click">Растрировать слой</span>.</p>
+    </details>
+    <details><summary>Долго считает</summary>
+      <p>Это нормально: плагины на JavaScript в Photoshop работают медленно. Фото 24 Мп — около 30 секунд, 60 Мп — около минуты. Отменить — <code>Esc</code>.</p>
+    </details>
+    <details><summary>Что-то сломалось — как сообщить</summary>
+      <p>Внизу панели нажми <span class="click">▸ Диагностика</span><span class="arrow">→</span><span class="click">Скопировать отчёт</span> и вставь текст в сообщение. Там всё нужное: версии, документ, ошибка.</p>
+    </details>
+  </div>
+
+  <h2 id="update">Обновить или удалить</h2>
+  <div class="step"><div class="num">↻</div><div class="body">
+    <h3>Новая версия плагина</h3>
+    <p>Закрой Photoshop, <b>удали старую папку</b> <code>dev.halation.photoshop</code> из Plug-ins и положи новую (шаги 3–5 установки). Две копии сразу ставить нельзя — они мешают друг другу.</p>
+  </div></div>
+  <div class="step"><div class="num">↑</div><div class="body">
+    <h3>Обновил сам Photoshop (например, 2025 → 2026)</h3>
+    <p>У новой версии своя папка Plug-ins — положи туда плагин заново.</p>
+  </div></div>
+  <div class="step"><div class="num">✕</div><div class="body">
+    <h3>Удалить</h3>
+    <p>Закрой Photoshop и удали папку <code>dev.halation.photoshop</code> из Plug-ins.</p>
+  </div></div>
+
+  <footer>Halation v1.0 · исходный код: <a href="https://github.com/kirvahe/odd91">github.com/kirvahe/odd91</a></footer>
+</div>
+
+<script>
+(function () {
+  var tabs = document.querySelectorAll('[data-os]');
+  function pick(os) {
+    tabs.forEach(function (el) {
+      if (el.tagName === 'BUTTON') el.setAttribute('aria-selected', el.dataset.os === os ? 'true' : 'false');
+      else el.classList.toggle('on', el.dataset.os === os);
+    });
+  }
+  document.querySelectorAll('.tabs button').forEach(function (b) {
+    b.addEventListener('click', function () { pick(b.dataset.os); });
+  });
+  var ua = (navigator.userAgent || '') + ' ' + (navigator.platform || '');
+  if (/Win/i.test(ua)) pick('win');
+
+  document.querySelectorAll('.copy').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var text = btn.dataset.copy;
+      function ok() { btn.textContent = 'Скопировано'; btn.classList.add('done'); setTimeout(function () { btn.textContent = 'Скопировать'; btn.classList.remove('done'); }, 1600); }
+      function fallback() {
+        var t = document.createElement('textarea');
+        t.value = text; document.body.appendChild(t); t.select();
+        try { document.execCommand('copy'); ok(); } catch (e) {}
+        document.body.removeChild(t);
+      }
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(ok, fallback);
+        else fallback();
+      } catch (e) { fallback(); }
+    });
+  });
+})();
+</script>
+</body>
+</html>

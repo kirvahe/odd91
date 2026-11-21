@@ -17,7 +17,7 @@
 
 ## Установка
 
-См. [docs/install-ru.md](docs/install-ru.md).
+**Пошаговая инструкция с картинками:** [docs/install-guide-ru.html](docs/install-guide-ru.html). Она же лежит в архиве релиза: скачай, распакуй и открой в браузере. Техническая версия — [docs/install-ru.md](docs/install-ru.md).
 
 ## Сборка и проверка
 
