@@ -13,9 +13,12 @@ for (let y = 40; y < 120; y++) for (let x = 100; x < 240; x++) { const p = (y * 
 // three small 255 lamps on the dark side
 for (const [cx, cy] of [[40, 50], [60, 110], [30, 80]]) for (let y = -2; y <= 2; y++) for (let x = -2; x <= 2; x++) { const p = ((cy + y) * W + cx + x) * 4; src[p] = src[p + 1] = src[p + 2] = 255; }
 
-function proosa(size, colorG) {
+// limit > 0: 8-bit mode of the Nuke gizmo: inverse Reinhard in, forward Reinhard out.
+function proosa(size, colorG, limit = 0) {
+  const inv = (x) => (limit ? (x * limit) / (limit - x) : x);
+  const fwd = (y) => (limit ? (y * limit) / (y + limit) : y);
   const lin = new Float32Array(W * H * 3);
-  for (let i = 0; i < W * H; i++) for (let c = 0; c < 3; c++) lin[i * 3 + c] = T.SRGB_LUT[src[i * 4 + c]];
+  for (let i = 0; i < W * H; i++) for (let c = 0; c < 3; c++) lin[i * 3 + c] = inv(T.SRGB_LUT[src[i * 4 + c]]);
   const R = Math.ceil(4.5 * size), kw = []; let ws = 0;
   for (let j = -R; j <= R; j++) for (let i = -R; i <= R; i++) { const v = Math.exp(-Math.hypot(i, j) / size); kw.push(v); ws += v; }
   const out = new Uint8Array(W * H * 4), color = [1, colorG, 0];
@@ -23,16 +26,18 @@ function proosa(size, colorG) {
     let b = [0, 0, 0], k = 0;
     for (let j = -R; j <= R; j++) { const yy = Math.min(H - 1, Math.max(0, y + j)); for (let i = -R; i <= R; i++) { const xx = Math.min(W - 1, Math.max(0, x + i)); const q = (yy * W + xx) * 3, wt = kw[k++]; b[0] += wt * lin[q]; b[1] += wt * lin[q + 1]; b[2] += wt * lin[q + 2]; } }
     const p = y * W + x;
-    for (let c = 0; c < 3; c++) out[p * 4 + c] = Math.round(T.linearToSrgb((lin[p * 3 + c] + (b[c] / ws) * color[c]) / (color[c] + 1)) * 255);
+    for (let c = 0; c < 3; c++) out[p * 4 + c] = Math.round(T.linearToSrgb(fwd((lin[p * 3 + c] + (b[c] / ws) * color[c]) / (color[c] + 1))) * 255);
     out[p * 4 + 3] = 255;
   }
   return out;
 }
 const opts = { docLongSide: 1600 };
+const R = { mode: 'reinhard', reinhardLimit: 1.1 };
 const panels = [
-  ['Proosa SIZE 3 (hotgluebanjo)', proosa(3, 0.15)],
-  ['old: normalized, strength 100', core.processImage(src, W, H, 4, { model: 'normalized', strength: 100, blur: 100 }, opts)],
-  ['new: excess, strength 100', core.processImage(src, W, H, 4, { model: 'excess', strength: 100, blur: 100 }, opts)],
+  ['Proosa SIZE 3 (hotgluebanjo), sRGB', proosa(3, 0.15)],
+  ['Proosa SIZE 3 + Reinhard 1.1 (gizmo 8-bit)', proosa(3, 0.15, 1.1)],
+  ['new excess + Reinhard 1.1, a=1, blur x1', core.processImage(src, W, H, 4, Object.assign({ model: 'excess', strength: 100, blur: 50 }, R), opts)],
+  ['new excess + Reinhard 1.1, a=0.25, blur x1', core.processImage(src, W, H, 4, Object.assign({ model: 'excess', strength: 50, blur: 50 }, R), opts)],
 ];
 const Z = 3, GAP = 6, PW = 140; // crop x 30..170 around the edge, magnify 3x
 const outW = panels.length * PW * Z + (panels.length - 1) * GAP, outH = H * Z;
@@ -44,7 +49,7 @@ panels.forEach(([, d], n) => {
     img[t] = d[s]; img[t + 1] = d[s + 1]; img[t + 2] = d[s + 2]; img[t + 3] = 255;
   }
   const row = (y, x0) => { const p = (y * W + x0) * 4; return `${d[p]},${d[p + 1]},${d[p + 2]}`; };
-  console.log(panels[n][0].padEnd(32), 'inner edge x=100..104:', [100, 101, 102, 103, 104].map((x) => row(80, x)).join(' '), '| lamp centre:', row(50, 40));
+  console.log(panels[n][0].padEnd(44), 'inner edge x=100..104:', [100, 101, 102, 103, 104].map((x) => row(80, x)).join(' '), '| lamp centre:', row(50, 40));
 });
 writeFileSync(new URL('../tmp/compare-models.png', import.meta.url), encodePng(outW, outH, img));
 console.log('wrote tmp/compare-models.png', outW, 'x', outH);

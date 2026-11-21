@@ -4,7 +4,7 @@
 const T = require('./transfer');
 
 const DEFAULT_COLOR = [255, 144, 39];
-const MAX_STRENGTH_A = 0.25;          // strength 100 -> A = 0.25
+const MAX_STRENGTH_A = 1.0;           // strength 100 -> A = 1 (quadratic slider, see strengthToA)
 const LAMBDA_FRACTION = 0.0018;       // core lambda = 0.18 % of the document long side at x1
 const LOBES = [[0.6, 1.0], [0.4, 3.3]]; // [weight, lambda factor]: core + tail exponentials
 // exp(-r/lambda) in 2D as a sum of isotropic Gaussians: [amplitude, sigma/lambda] (spektrafilm fit)
@@ -21,7 +21,8 @@ const MODELS = ['excess', 'normalized'];
 
 const DEFAULTS = Object.freeze({
   model: 'excess',
-  mode: 'srgb',
+  mode: 'srgb',          // 'srgb' | 'curve' | 'reinhard' (8-bit -> scene-linear, inverse Reinhard)
+  reinhardLimit: 1.1,
   curvePoints: Object.freeze(T.defaultCurvePoints().map((p) => Object.freeze(p))),
   color: Object.freeze(DEFAULT_COLOR.slice()),
   blur: 50,
@@ -39,8 +40,11 @@ function blurMultiplier(blur) {
   return Math.pow(2, (clampNum(blur, 0, 100, 50) - 50) / 25);
 }
 
+// Quadratic slider: 30 -> 0.09 (near the measured film values 0.05-0.12), 50 -> 0.25,
+// 100 -> 1.0 (the strength of hotgluebanjo's Proosa method, a_R = 1).
 function strengthToA(strength) {
-  return (MAX_STRENGTH_A * clampNum(strength, 0, 100, 30)) / 100;
+  const u = clampNum(strength, 0, 100, 30) / 100;
+  return MAX_STRENGTH_A * u * u;
 }
 
 // Linearized glow color normalized to max = 1, or null when the color is (near) black.
@@ -55,9 +59,25 @@ function colorGains(color) {
   return [l[0] / mx, l[1] / mx, l[2] / mx];
 }
 
+// Inverse Reinhard expansion for display-referred 8-bit input (as in the Nuke "Halation" gizmo's
+// 8-bit mode): x = sRGB-linear display value, y = x*Lim/(Lim - x) is scene-linear with headroom
+// (Lim = 1.1 -> code 255 is 11x scene white). Normalized so code 255 -> 1; re-encoding through
+// the same table is the forward Reinhard, i.e. a film-like shoulder on output.
+function reinhardLut(limit) {
+  const lut = new Float32Array(256);
+  const top = limit / (limit - 1);
+  for (let c = 0; c < 256; c++) {
+    const x = T.SRGB_LUT[c];
+    lut[c] = (x * limit) / (limit - x) / top;
+  }
+  lut[0] = 0;
+  lut[255] = 1;
+  return lut;
+}
+
 function normalizeSettings(partial) {
   const s = partial && typeof partial === 'object' ? partial : {};
-  const mode = s.mode === 'curve' ? 'curve' : 'srgb';
+  const mode = s.mode === 'curve' || s.mode === 'reinhard' ? s.mode : 'srgb';
   let curvePoints = T.defaultCurvePoints();
   if (s.curvePoints !== undefined) {
     const v = T.validateCurve(s.curvePoints);
@@ -78,6 +98,7 @@ function normalizeSettings(partial) {
     color,
     blur: clampNum(s.blur, 0, 100, 50),
     strength: clampNum(s.strength, 0, 100, 30),
+    reinhardLimit: clampNum(s.reinhardLimit, 1.01, 4, 1.1),
     radii,
   };
 }
@@ -85,6 +106,7 @@ function normalizeSettings(partial) {
 function buildLutIn(settings) {
   const s = normalizeSettings(settings);
   if (s.mode === 'srgb') return new Float32Array(T.SRGB_LUT);
+  if (s.mode === 'reinhard') return reinhardLut(s.reinhardLimit);
   return T.lutFromPoints(s.curvePoints);
 }
 

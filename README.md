@@ -1,4 +1,4 @@
-# ilyushi: Halation для Photoshop
+# odd91: Halation для Photoshop
 
 Плагин для Photoshop (UXP, чистый JavaScript), который добавляет плёночный ореол — halation — вокруг ярких мест.
 

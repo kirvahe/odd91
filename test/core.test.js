@@ -49,6 +49,8 @@ function jumpCurve(k) {
 const PLATEAU = [[50, 0.05], [100, 0.2], [150, 0.2002], [200, 0.6]];
 const CURVES = {
   srgb: { mode: 'srgb' },
+  reinhard: { mode: 'reinhard', reinhardLimit: 1.1 },
+  reinhardSteep: { mode: 'reinhard', reinhardLimit: 1.01 },
   jump10: { mode: 'curve', curvePoints: jumpCurve(10) },
   jump100: { mode: 'curve', curvePoints: jumpCurve(100) },
   plateau: { mode: 'curve', curvePoints: PLATEAU },
@@ -65,9 +67,11 @@ function runField(data, w, h, comps, settings, opts = {}) {
 
 test('test curves are valid and LUT_in strictly increasing', () => {
   for (const [name, c] of Object.entries(CURVES)) {
-    if (c.mode !== 'curve') continue;
-    const v = core.validateCurve(c.curvePoints);
-    assert.equal(v.ok, true, `${name}: ${v.reason}`);
+    if (c.mode === 'srgb') continue;
+    if (c.mode === 'curve') {
+      const v = core.validateCurve(c.curvePoints);
+      assert.equal(v.ok, true, `${name}: ${v.reason}`);
+    }
     const lut = core.buildLutIn(c);
     for (let i = 0; i < 255; i++) assert.ok(lut[i + 1] > lut[i], `${name} at ${i}`);
     assert.equal(lut[0], 0);
