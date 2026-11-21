@@ -16,8 +16,29 @@
       <sp-radio-group id="mode-group" name="mode">
         <sp-radio value="srgb" checked>sRGB</sp-radio>
         <sp-radio value="curve">Своя кривая</sp-radio>
+        <sp-radio value="reinhard">8 бит → scene-linear</sp-radio>
       </sp-radio-group>
     </div>
+
+    <!-- 8 бит → scene-linear: обратный Reinhard, только в этом режиме -->
+    <div id="reinhard-section" class="section is-hidden">
+      <div class="slider-row">
+        <sp-label class="slider-label">Limit</sp-label>
+        <sp-slider id="reinhard-slider" class="slider" min="0" max="100" value="40" show-value="false"></sp-slider>
+        <span id="reinhard-value" class="slider-value">1.10</span>
+      </div>
+      <sp-detail id="reinhard-hint" class="hint">Как 8-битный режим гизмо Halation для Nuke: обратная кривая Reinhard возвращает светам запас над белым. Код 255 ярче белого в ×11.</sp-detail>
+    </div>
+
+    <!-- Метод расчёта ореола -->
+    <div class="row">
+      <sp-label class="row-label">Метод:</sp-label>
+      <sp-radio-group id="method-group" name="method">
+        <sp-radio value="excess" checked>Без каймы</sp-radio>
+        <sp-radio value="normalized">Proosa</sp-radio>
+      </sp-radio-group>
+    </div>
+    <sp-detail id="method-hint" class="hint">Свечение только с тёмной стороны границ; светлое и источники не меняются.</sp-detail>
 
     <!-- Редактор кривой: только в режиме «Своя кривая» -->
     <div id="curve-section" class="section is-hidden">

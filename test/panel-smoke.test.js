@@ -191,12 +191,33 @@ test("panel: show builds the preview, sliders render draft then full, apply runs
   assert.ok(!dom["preview-stale"].classList.contains("is-hidden"));
   assert.equal(fake.log.modal.length, modalsBefore);
 
+  // 8-bit -> scene-linear mode shows the limit slider; the slider maps to reinhardLimit
+  dom["mode-group"].children.forEach((r, i) => { r.checked = i === 2; });
+  dom["mode-group"].dispatch("change");
+  assert.equal(state.settings.mode, "reinhard");
+  assert.ok(!dom["reinhard-section"].classList.contains("is-hidden"));
+  assert.ok(dom["curve-section"].classList.contains("is-hidden"));
+  assert.equal(dom["reinhard-value"].textContent, "1.10");
+  dom["reinhard-slider"].value = 0;
+  dom["reinhard-slider"].dispatch("change");
+  assert.ok(Math.abs(state.settings.reinhardLimit - 1.01) < 1e-9);
+  assert.match(dom["reinhard-hint"].textContent, /×101/);
+
+  // method switch: Proosa = the normalized model
+  dom["method-group"].children.forEach((r, i) => { r.checked = i === 1; });
+  dom["method-group"].dispatch("change");
+  assert.equal(state.settings.model, "normalized");
+  assert.match(dom["method-hint"].textContent, /hotgluebanjo/);
+  dom["method-group"].children.forEach((r, i) => { r.checked = i === 0; });
+  dom["method-group"].dispatch("change");
+  assert.equal(state.settings.model, "excess");
+
   // curve mode shows the editor
-  dom["mode-group"].children[1].checked = true;
-  dom["mode-group"].children[0].checked = false;
+  dom["mode-group"].children.forEach((r, i) => { r.checked = i === 1; });
   dom["mode-group"].dispatch("change");
   assert.equal(state.settings.mode, "curve");
   assert.ok(!dom["curve-section"].classList.contains("is-hidden"));
+  assert.ok(dom["reinhard-section"].classList.contains("is-hidden"));
 
   // apply
   dom["btn-apply"].dispatch("click");

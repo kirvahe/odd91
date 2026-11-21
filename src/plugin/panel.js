@@ -228,10 +228,46 @@
   }
 
   function renderMode() {
-    var curve = state.settings.mode === "curve";
-    setRadio($("mode-group"), curve ? "curve" : "srgb");
+    var mode = state.settings.mode;
+    var curve = mode === "curve";
+    setRadio($("mode-group"), mode);
     show($("curve-section"), curve);
+    show($("reinhard-section"), mode === "reinhard");
     if (curve && state.editor) state.editor.resize();
+    renderReinhard();
+  }
+
+  // Limit slider 0..100 on a log scale: 1.01 .. 4.0 (default 1.1 at ~40).
+  var REINHARD_MIN = 1.01;
+  var REINHARD_MAX = 4;
+  function limitFromSlider(u) {
+    var t = Math.min(100, Math.max(0, Number(u) || 0)) / 100;
+    return 1 + (REINHARD_MIN - 1) * Math.pow((REINHARD_MAX - 1) / (REINHARD_MIN - 1), t);
+  }
+  function sliderFromLimit(limit) {
+    var l = Math.min(REINHARD_MAX, Math.max(REINHARD_MIN, Number(limit) || 1.1));
+    return (100 * Math.log((l - 1) / (REINHARD_MIN - 1))) / Math.log((REINHARD_MAX - 1) / (REINHARD_MIN - 1));
+  }
+  function renderReinhardLabels() {
+    var l = state.settings.reinhardLimit;
+    var headroom = l / (l - 1);
+    $("reinhard-value").textContent = l.toFixed(2);
+    $("reinhard-hint").textContent = "Как 8-битный режим гизмо Halation для Nuke: обратная кривая Reinhard возвращает светам запас над белым. Код 255 ярче белого в ×" +
+      (headroom >= 10 ? Math.round(headroom) : headroom.toFixed(1)) + ".";
+  }
+  function renderReinhard() {
+    $("reinhard-slider").value = Math.round(sliderFromLimit(state.settings.reinhardLimit));
+    renderReinhardLabels();
+  }
+
+  var METHOD_HINTS = {
+    excess: "Свечение только с тёмной стороны границ; светлое и источники не меняются.",
+    normalized: "Как hotgluebanjo/halation-dctl: энергия сохраняется, но светлые края и мелкие источники теряют красный (голубоватая кайма). Лучше вместе с режимом «8 бит → scene-linear»."
+  };
+  function renderMethod() {
+    var m = state.settings.model;
+    setRadio($("method-group"), m);
+    $("method-hint").textContent = METHOD_HINTS[m] || "";
   }
 
   function renderColor() {
@@ -776,10 +812,24 @@
   function bindControls() {
     $("mode-group").addEventListener("change", function (e) {
       var v = radioValue($("mode-group"), e);
-      if (v !== "srgb" && v !== "curve") return;
+      if (v !== "srgb" && v !== "curve" && v !== "reinhard") return;
       updateSettings({ mode: v });
       renderMode();
     });
+
+    $("method-group").addEventListener("change", function (e) {
+      var v = radioValue($("method-group"), e);
+      if (v !== "excess" && v !== "normalized") return;
+      updateSettings({ model: v });
+      renderMethod();
+    });
+
+    function reinhardHandler(stage) {
+      updateSettings({ reinhardLimit: limitFromSlider($("reinhard-slider").value) }, stage);
+      renderReinhardLabels();
+    }
+    $("reinhard-slider").addEventListener("input", function () { reinhardHandler("draft"); });
+    $("reinhard-slider").addEventListener("change", function () { reinhardHandler("full"); });
 
     $("axis-group").addEventListener("change", function (e) {
       var v = radioValue($("axis-group"), e);
@@ -864,6 +914,7 @@
 
   function applyStateToControls() {
     renderMode();
+    renderMethod();
     renderSliders();
     renderColor();
     syncHsvSliders();
