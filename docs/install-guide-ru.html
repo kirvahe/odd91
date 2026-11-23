@@ -110,6 +110,7 @@
     <a href="#need">Что нужно</a>
     <a href="#install">Установка</a>
     <a href="#use">Как пользоваться</a>
+    <a href="#loupe">Лупа</a>
     <a href="#recipe">Быстрый рецепт</a>
     <a href="#lamps">Лампы ярче</a>
     <a href="#trouble">Не работает</a>
@@ -230,62 +231,91 @@
   </section>
 
   <h2 id="use">Как пользоваться</h2>
-  <p>Так выглядит панель. Цифры — куда смотреть и нажимать.</p>
+  <p>Так выглядит панель (версия 1.1). Цифры — куда смотреть и нажимать.</p>
   <div class="panelwrap">
     <div class="ps" aria-label="Схема панели плагина">
       <div class="bar"><span>HALATION</span><span>≡</span></div>
       <div class="in">
-        <div class="r"><span class="lab">Режим:</span><span class="rad"><i></i>sRGB</span><span class="rad"><i></i>Своя кривая</span><span class="rad on"><i></i>8 бит → scene-linear</span><span class="badge">1</span></div>
+        <div class="r"><span class="lab">Пресет:</span><span class="small">CineStill 800T ▾</span><span class="small">Загрузить</span><span class="badge">1</span></div>
+        <div class="r"><span class="small">Сохранить как…</span><span class="small">Удалить</span><span class="small">Взять настройки из слоя</span></div>
+        <div class="r"><span class="lab">Режим:</span><span class="rad"><i></i>sRGB</span><span class="rad"><i></i>Своя кривая</span><span class="rad on"><i></i>8 бит → scene-linear</span><span class="badge">2</span></div>
         <div class="r"><span class="lab">Limit</span><span class="sl"><b style="left:38%"></b></span><span class="val">1.10</span></div>
-        <div class="r"><span class="lab">Метод:</span><span class="rad on"><i></i>Без каймы</span><span class="rad"><i></i>Proosa</span><span class="badge">2</span></div>
-        <div class="r"><span class="lab">Цвет:</span><span class="sw"></span><span class="small">Выбрать…</span><span class="badge">3</span></div>
-        <div class="r"><span class="lab">Размытие</span><span class="sl"><b style="left:48%"></b></span><span class="val">×1.00</span><span class="badge">4</span></div>
-        <div class="r"><span class="lab">Сила</span><span class="sl"><b style="left:28%"></b></span><span class="val">30</span><span class="badge">5</span></div>
-        <div class="r" style="display:block"><div class="prev"><span style="left:28%;top:30%"></span><span style="left:62%;top:55%"></span><span style="left:45%;top:75%"></span></div><span class="badge">6</span></div>
+        <div class="r"><span class="lab">Метод:</span><span class="rad on"><i></i>Без каймы</span><span class="rad"><i></i>Proosa</span><span class="badge">3</span></div>
+        <div class="r"><span class="lab">Цвет:</span><span class="sw"></span><span class="small">Палитра…</span><span class="badge">4</span></div>
+        <div class="r"><span class="lab">Размытие</span><span class="sl"><b style="left:72%"></b></span><span class="small">1.00</span><span class="badge">5</span></div>
+        <div class="r"><span class="lab">Сила</span><span class="sl"><b style="left:10%"></b></span><span class="small">40 %</span></div>
+        <div class="r"><span class="lab">Порог</span><span class="sl"><b style="left:0%"></b></span><span class="small">0</span><span class="badge">6</span></div>
+        <div class="r"><span class="lab">Плавность</span><span class="sl"><b style="left:12%"></b></span><span class="small">32</span></div>
+        <div class="r"><span class="seg"><em>Кадр</em><em class="on">Лупа</em></span><span class="seg"><em class="on">×1</em><em>×2</em></span><span class="badge">7</span></div>
+        <div class="r" style="display:block"><div class="prev"><span style="left:28%;top:30%"></span><span style="left:62%;top:55%"></span><span style="left:45%;top:75%"></span></div></div>
         <div class="r"><span class="seg"><em>До</em><em class="on">После</em><em>Только ореол</em></span><span class="small">Обновить</span></div>
         <div class="r"><span class="rad on"><i style="border-radius:3px"></i>Заменять прежний результат</span></div>
-        <div class="r" style="display:block"><div class="btn">Применить</div><span class="badge">7</span></div>
+        <div class="r"><span class="rad on"><i style="border-radius:3px"></i>Только в выделении</span><span class="badge">8</span></div>
+        <div class="r" style="display:block"><div class="btn">Применить</div><span class="badge">9</span></div>
         <div class="r" style="color:#9a9a9a">▸ Диагностика</div>
       </div>
     </div>
     <ol class="legend">
-      <li><b>Режим.</b> Как плагин понимает яркость картинки. Ставь <b>8 бит → scene-linear</b> — так лампы и блики светятся сильнее остального, как на плёнке. Ползунок <b>Limit</b> под ним: меньше — сильнее выделяются самые яркие места.</li>
+      <li><b>Пресет.</b> Готовые образы: «CineStill 800T», «Vision3 — мягко», «Только лампы» — или твои собственные. Выбери в списке и нажми <b>Загрузить</b>. Подобрал настройки, в том числе свою кривую, — нажми <b>Сохранить как…</b>, впиши имя и <b>Сохранить</b>.</li>
+      <li><b>Режим.</b> Ставь <b>8 бит → scene-linear</b>: лампы и блики светятся сильнее остального, как на плёнке. Ползунок <b>Limit</b>: чем ближе к 1, тем сильнее выделяются самые яркие места.</li>
       <li><b>Метод.</b> Оставь <b>Без каймы</b>. «Proosa» — как в видео-плагине hotgluebanjo, но на светлых краях может дать голубоватую кайму.</li>
-      <li><b>Цвет свечения.</b> Нажми на квадратик — откроется палитра Photoshop. По умолчанию тёплый оранжевый, как у плёнки.</li>
-      <li><b>Размытие</b> — насколько широко расходится свечение. Не зависит от размера файла.</li>
-      <li><b>Сила</b> — насколько ярко светится. 30 — спокойно, 50–70 — заметно, 100 — максимум.</li>
-      <li><b>Предпросмотр.</b> Переключай <b>До / После / Только ореол</b>. Пока тянешь ползунок, картинка грубее — через полсекунды станет чёткой. Если поменял слой или документ, нажми <b>Обновить</b>.</li>
-      <li><b>Применить.</b> Плагин создаст новый слой <b>«Halation»</b> над твоим. Сам снимок не трогается. На большой фотографии это займёт до минуты — внизу Photoshop будет полоска прогресса, отменить можно клавишей <code>Esc</code>.</li>
+      <li><b>Цвет свечения.</b> <b>Палитра…</b> открывает палитру Photoshop. По умолчанию тёплый оранжевый.</li>
+      <li><b>Размытие и Сила.</b> Тяни ползунок или впиши число в поле справа. Размытие — от ×0.01 до ×4 (ширина свечения). Сила — от 0 до 400 %.</li>
+      <li><b>Порог и Плавность</b> (раздел «Источник свечения»). Порог 0 — светятся все светлые места. Подними порог, например до 230, — светиться будут только места ярче него. Плавность — насколько мягко включается свечение около порога.</li>
+      <li><b>Кадр / Лупа.</b> В «Кадре» видно всё фото, но маленьким. <b>Щёлкни по картинке</b> — там откроется <b>лупа 1:1</b>: этот кусок в настоящем размере, со свечением ровно как будет после «Применить». <b>×2</b> — увеличить ещё вдвое. Вернуться к кадру — кнопка <b>Кадр</b>.</li>
+      <li><b>Только в выделении.</b> Если перед нажатием «Применить» выделить область (Лассо, Быстрое выделение), свечение будет только там: слой «Halation» получит маску по выделению. Растушёвка выделения сохраняется.</li>
+      <li><b>Применить.</b> Плагин создаст новый слой над твоим. Сам снимок не трогается. Отмена — <code>Esc</code>, в истории один шаг.</li>
     </ol>
   </div>
+
+  <h2 id="loupe">Как смотреть результат до применения</h2>
+  <div class="step"><div class="num">🔍</div><div class="body">
+    <h3>Лупа 1:1</h3>
+    <ol>
+      <li>Под ползунками нажми <b>Кадр</b> — появится всё фото.</li>
+      <li>Щёлкни мышкой по интересному месту, например по лампе.</li>
+      <li>Откроется лупа: этот участок в полном размере. Двигай ползунки — картинка в лупе пересчитывается сама.</li>
+      <li>Переключай <b>До / После / Только ореол</b>, чтобы сравнить.</li>
+    </ol>
+    <p class="note">Лупа считает ровно так же, как «Применить», поэтому то, что видно в ней, и будет на снимке.</p>
+  </div></div>
+
+  <h2 id="layername">Вернуться к настройкам через неделю</h2>
+  <div class="step"><div class="num">↩</div><div class="body">
+    <p>В имени слоя «Halation» записаны все настройки, с которыми он сделан. Открой PSD, выдели этот слой в панели Слои и нажми <b>Взять настройки из слоя</b> — панель выставит те же параметры. Поменяй что нужно и нажми «Применить»: старый слой заменится, если стоит галочка «Заменять прежний результат».</p>
+  </div></div>
 
   <h2 id="recipe">Быстрый рецепт</h2>
   <div class="recipe">
     <b>Хочу «как на плёнке» за 10 секунд:</b>
     <ol>
       <li>Выбери слой с фотографией (в панели Слои).</li>
-      <li>Режим — <b>8 бит → scene-linear</b>, Метод — <b>Без каймы</b>.</li>
-      <li>Сила — <b>40</b>, Размытие — как нравится в предпросмотре.</li>
+      <li>Пресет — <b>CineStill 800T</b> (ярко) или <b>Vision3 — мягко</b> (едва заметно) → <b>Загрузить</b>.</li>
+      <li>Нажми <b>Кадр</b>, щёлкни по лампе — посмотри в лупе. Подкрути <b>Силу</b> и <b>Размытие</b>.</li>
       <li>Нажми <b>Применить</b>. Не понравилось — <code>⌘ Z</code> / <code>Ctrl Z</code>, поменяй ползунки, нажми ещё раз.</li>
     </ol>
   </div>
   <p class="note">Галочка <b>«Заменять прежний результат»</b> означает: при повторном нажатии старый слой «Halation» заменится новым, а не ляжет сверху ещё одним.</p>
 
   <h2 id="lamps">Если хочется, чтобы светились только лампы</h2>
-  <p>В обычной 8-битной картинке лампа и белая стена одинаково белые (255), поэтому плагин может считать их одинаково яркими. Есть два способа это исправить:</p>
+  <p>В обычной 8-битной картинке лампа и белая стена одинаково белые (255). Есть три способа выделить лампы:</p>
   <div class="step"><div class="num">А</div><div class="body">
-    <h3>Просто — режим «8 бит → scene-linear»</h3>
-    <p>Чем ближе цвет к чисто белому, тем сильнее светится. Двигай <b>Limit</b> к 1.01, чтобы светились только самые-самые яркие места.</p>
+    <h3>Проще всего — пресет «Только лампы»</h3>
+    <p>Он ставит режим «8 бит → scene-linear» и <b>Порог 235</b>: светятся только самые яркие места. Порог можно двигать — смотри результат в лупе.</p>
   </div></div>
   <div class="step"><div class="num">Б</div><div class="body">
+    <h3>Порог вручную</h3>
+    <p>В разделе «Источник свечения» подними <b>Порог</b> (например, 220–240) и подбери <b>Плавность</b>: маленькая — резкая граница «светится / не светится», большая — мягкий переход.</p>
+  </div></div>
+  <div class="step"><div class="num">В</div><div class="body">
     <h3>Точно — «Своя кривая», если белое (255) стоит только на лампах</h3>
     <ol>
       <li>Режим — <b>Своя кривая</b>.</li>
       <li>Щёлкни по графику, чтобы добавить точку, и впиши в поля: <b>X = 254</b>, <b>Y = 0.991102</b>.</li>
       <li>В поле <b>k</b> впиши <b>0.0333</b> и нажми <span class="click">×k</span>. Теперь лампы в 30 раз ярче всего остального.</li>
-      <li>Чтобы видеть всю кривую, переключи <b>Ось Y</b> на <b>лог</b>.</li>
+      <li>Сохрани это как пресет (<b>Сохранить как…</b>), чтобы не настраивать заново.</li>
     </ol>
-    <p class="note">Белое должно быть белым во <b>всех трёх</b> каналах (255, 255, 255). Тёплая лампа вроде 255, 250, 236 засветится только красным. Красное платье с красным 255 тоже засветится, как лампа.</p>
+    <p class="note">Белое должно быть белым во <b>всех трёх</b> каналах (255, 255, 255). Тёплая лампа вроде 255, 250, 236 при своей кривой засветится только красным.</p>
   </div></div>
 
   <h2 id="trouble">Если не работает</h2>
@@ -321,7 +351,7 @@
     <p>Закрой Photoshop и удали папку <code>dev.halation.photoshop</code> из Plug-ins.</p>
   </div></div>
 
-  <footer>Halation v1.0 · исходный код: <a href="https://github.com/kirvahe/odd91">github.com/kirvahe/odd91</a></footer>
+  <footer>Halation v1.1 · исходный код: <a href="https://github.com/kirvahe/odd91">github.com/kirvahe/odd91</a></footer>
 </div>
 
 <script>
