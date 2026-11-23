@@ -10,6 +10,29 @@
 
     <div id="fatal" class="message message-error is-hidden"></div>
 
+    <!-- Пресеты: встроенные (core.LOOKS) и свои -->
+    <div class="row">
+      <sp-label class="row-label">Пресет:</sp-label>
+      <sp-picker id="preset-picker" class="preset-picker" placeholder="Выберите пресет">
+        <sp-menu slot="options" id="preset-menu"></sp-menu>
+      </sp-picker>
+    </div>
+    <sp-detail id="preset-description" class="hint"></sp-detail>
+    <div class="row">
+      <sp-action-button id="btn-preset-load">Загрузить</sp-action-button>
+      <sp-action-button id="btn-preset-save">Сохранить как…</sp-action-button>
+      <sp-action-button id="btn-preset-delete" disabled>Удалить</sp-action-button>
+    </div>
+    <div id="preset-save-row" class="row is-hidden">
+      <sp-textfield id="preset-name" class="field field-name" placeholder="Название пресета"></sp-textfield>
+      <sp-action-button id="btn-preset-save-ok">Сохранить</sp-action-button>
+      <sp-action-button id="btn-preset-save-cancel" quiet>Отмена</sp-action-button>
+    </div>
+    <div id="from-layer-row" class="row is-hidden">
+      <sp-action-button id="btn-from-layer">Взять настройки из слоя</sp-action-button>
+    </div>
+    <div id="preset-message" class="message is-hidden"></div>
+
     <!-- Режим перевода в линейную гамму -->
     <div class="row">
       <sp-label class="row-label">Режим:</sp-label>
@@ -107,26 +130,56 @@
       <div id="color-message" class="message message-warn is-hidden"></div>
     </div>
 
-    <!-- Размытие и сила -->
+    <!-- Размытие и сила: ползунок и поле для точного значения -->
     <div class="section">
       <div class="slider-row">
         <sp-label class="slider-label">Размытие</sp-label>
-        <sp-slider id="blur-slider" class="slider" min="0" max="100" value="50" show-value="false"></sp-slider>
-        <span id="blur-value" class="slider-value">×1.00</span>
+        <sp-slider id="blur-slider" class="slider" min="0" max="100" step="0.1" value="76.9" show-value="false"></sp-slider>
+        <sp-textfield id="blur-field" class="field field-num" value="×1.00"></sp-textfield>
       </div>
       <div class="slider-row">
         <sp-label class="slider-label">Сила</sp-label>
-        <sp-slider id="strength-slider" class="slider" min="0" max="100" value="30" show-value="false"></sp-slider>
-        <span id="strength-value" class="slider-value">30</span>
+        <sp-slider id="strength-slider" class="slider" min="0" max="400" value="30" show-value="false"></sp-slider>
+        <sp-textfield id="strength-field" class="field field-num" value="30 %"></sp-textfield>
       </div>
+      <div id="slider-message" class="message message-warn is-hidden"></div>
+    </div>
+
+    <!-- Источник свечения: порог и плавность -->
+    <div class="section">
+      <sp-label class="section-title">Источник свечения</sp-label>
+      <div class="slider-row">
+        <sp-label class="slider-label">Порог</sp-label>
+        <sp-slider id="threshold-slider" class="slider" min="0" max="255" value="0" show-value="false"></sp-slider>
+        <sp-textfield id="threshold-field" class="field field-num" value="0"></sp-textfield>
+      </div>
+      <div class="slider-row">
+        <sp-label class="slider-label">Плавность</sp-label>
+        <sp-slider id="softness-slider" class="slider" min="0" max="255" value="32" show-value="false"></sp-slider>
+        <sp-textfield id="softness-field" class="field field-num" value="32"></sp-textfield>
+      </div>
+      <sp-detail class="hint">0 — светятся все светлые места. Выше порог — светятся только места ярче него.</sp-detail>
     </div>
 
     <!-- Предпросмотр -->
     <div class="section">
+      <div class="row">
+        <sp-radio-group id="preview-mode-group" name="preview-mode">
+          <sp-radio value="frame" checked>Кадр</sp-radio>
+          <sp-radio value="loupe">Лупа</sp-radio>
+        </sp-radio-group>
+        <sp-radio-group id="zoom-group" name="zoom" class="is-hidden">
+          <sp-radio value="1" checked>×1</sp-radio>
+          <sp-radio value="2">×2</sp-radio>
+        </sp-radio-group>
+      </div>
+      <!-- Fixed height: swapping images never changes the layout (v1.1) -->
       <div id="preview-wrap" class="preview-wrap">
         <img id="preview-img" class="preview-img is-hidden" alt="Предпросмотр">
+        <div id="loupe-frame" class="loupe-frame is-hidden"></div>
         <div id="preview-placeholder" class="preview-placeholder">Предпросмотр появится после открытия документа</div>
       </div>
+      <sp-detail id="loupe-hint" class="hint">В режиме «Кадр» щёлкните по картинке — там откроется лупа 1:1.</sp-detail>
       <sp-detail id="preview-progress" class="hint progress is-hidden">Готовлю предпросмотр…</sp-detail>
       <sp-detail id="preview-source" class="hint"></sp-detail>
       <div class="row">
@@ -146,6 +199,7 @@
     <!-- Применение -->
     <div class="section">
       <sp-checkbox id="replace-checkbox" checked>Заменять прежний результат</sp-checkbox>
+      <sp-checkbox id="mask-checkbox" class="is-hidden" checked>Только в выделении</sp-checkbox>
       <div class="row row-center">
         <sp-button id="btn-apply" variant="cta">Применить</sp-button>
       </div>

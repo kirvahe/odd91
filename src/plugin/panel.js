@@ -7,7 +7,7 @@
 (function () {
   "use strict";
 
-  var PLUGIN_VERSION = "1.0.0"; // checked against manifest.json by tools/build-ccx.mjs
+  var PLUGIN_VERSION = "1.1.0"; // checked against manifest.json by tools/build-ccx.mjs
   var PANEL_ID = "halationPanel";
   var PREVIEW_MAX_SIDE = 500;
   // Two-stage preview (src/core/API.md): a half-size draft while something moves,
@@ -17,6 +17,10 @@
   var FULL_AFTER_CHANGE_MS = 30;
   var SAVE_DEBOUNCE_MS = 300;
   var SHOW_FALLBACK_MS = 3000;
+  var PREVIEW_BOX_H = 280;      // fixed preview box height, keep in sync with .preview-wrap
+  var LOUPE_DEBOUNCE_MS = 150;  // loupe re-render after a setting change
+  var LOUPE_ALIGN = 64;         // loupe reads start on this grid from the work-area origin
+  var RESIZE_MIN_DELTA = 8;     // window-resize width changes below this are ignored
 
   function tryRequire(name) {
     try {
@@ -98,6 +102,7 @@
   var Color = window.HalationColor;
   var Bridge = window.HalationBridge;
   var Editor = window.HalationCurveEditor;
+  var Store = window.HalationSettingsStore;
   var diag = window.HalationDiagnostics.create({ pluginVersion: PLUGIN_VERSION });
 
   var state = {
@@ -123,7 +128,15 @@
     imageBlobFailed: false,
     displaySeq: 0,
     memoryWarned: false,
-    pendingConfirm: null
+    pendingConfirm: null,
+    previewPlan: null,      // source of the preview cache, reused by the loupe
+    previewDisplay: null,   // { dw, dh } of the frame thumbnail, for clicks and the frame overlay
+    loupe: { center: null, raw: null, timer: null, needsRead: false },
+    presets: [],            // user presets from the settings store
+    presetValue: null,      // selected picker value: "look:<id>" | "user:<name>"
+    maskChoice: null,       // "Только в выделении": null = default (on), else the user's choice
+    layerSettings: null,    // settings carried by the active layer's name
+    lastWindowWidth: null
   };
 
   // ------------------------------------------------------------------ status
@@ -172,7 +185,13 @@
     for (k in patch) if (Object.prototype.hasOwnProperty.call(patch, k)) next[k] = patch[k];
     state.settings = core.normalizeSettings(next);
     scheduleSave();
-    schedulePreview(stage === "draft" ? "draft" : "full");
+    scheduleRender(stage === "draft" ? "draft" : "full");
+  }
+
+  // Only the visible view is recomputed: the frame preview or the loupe.
+  function scheduleRender(stage) {
+    if (state.ui && state.ui.previewMode === "loupe") scheduleLoupe(stage);
+    else schedulePreview(stage);
   }
 
   function updateUi(patch) {
@@ -213,18 +232,76 @@
 
   // ------------------------------------------------------------------ controls
 
+  // ×0.010 … ×4.00: three decimals below 0.1, two above.
+  function formatBlur(m) {
+    return "×" + (m < 0.1 ? m.toFixed(3) : m.toFixed(2));
+  }
+
+  function parseFieldNumber(text) {
+    var t = String(text === undefined || text === null ? "" : text).replace(/[×x%\s]/gi, "").replace(",", ".");
+    if (!t) return NaN;
+    return Number(t);
+  }
+
+  // Numeric fields next to the sliders (v1.1): range, settings patch and display.
+  var NUMBER_FIELDS = {
+    "blur-field": {
+      min: 0.01, max: 4, label: "Размытие",
+      patch: function (v) { return { blurMul: v }; },
+      text: function (s) { return formatBlur(s.blurMul); }
+    },
+    "strength-field": {
+      min: 0, max: 400, label: "Сила",
+      patch: function (v) { return { strength: v }; },
+      text: function (s) { return Math.round(s.strength) + " %"; }
+    },
+    "threshold-field": {
+      min: 0, max: 255, label: "Порог",
+      patch: function (v) { return { threshold: Math.round(v) }; },
+      text: function (s) { return String(Math.round(s.threshold)); }
+    },
+    "softness-field": {
+      min: 0, max: 255, label: "Плавность",
+      patch: function (v) { return { softness: Math.round(v) }; },
+      text: function (s) { return String(Math.round(s.softness)); }
+    }
+  };
+
+  function setField(id, text) {
+    var el = $(id);
+    if (!el) return;
+    el.value = text;
+    el.setAttribute("value", text);
+  }
+
   function renderSliders() {
     var s = state.settings;
-    $("blur-slider").value = s.blur;
+    $("blur-slider").value = Math.round(core.blurToSlider(s.blurMul) * 10) / 10;
     $("strength-slider").value = s.strength;
+    $("threshold-slider").value = s.threshold;
+    $("softness-slider").value = s.softness;
     renderSliderLabels();
   }
 
   function renderSliderLabels() {
     var s = state.settings;
-    var m = core.blurMultiplier(s.blur);
-    $("blur-value").textContent = "×" + (m >= 10 ? m.toFixed(1) : m.toFixed(2));
-    $("strength-value").textContent = String(Math.round(s.strength));
+    for (var id in NUMBER_FIELDS) {
+      if (Object.prototype.hasOwnProperty.call(NUMBER_FIELDS, id)) setField(id, NUMBER_FIELDS[id].text(s));
+    }
+  }
+
+  function commitNumberField(id) {
+    var f = NUMBER_FIELDS[id];
+    var v = parseFieldNumber($(id).value);
+    if (!isFinite(v)) {
+      setMessage("slider-message", f.label + ": введите число от " + f.min + " до " + f.max + ".");
+      renderSliderLabels();
+      return;
+    }
+    var clamped = Math.min(f.max, Math.max(f.min, v));
+    setMessage("slider-message", clamped !== v ? f.label + ": значение ограничено диапазоном " + f.min + "–" + f.max + "." : "");
+    updateSettings(f.patch(clamped), "full");
+    renderSliders();
   }
 
   function renderMode() {
@@ -408,6 +485,7 @@
 
   function updateStaleLabel() {
     show($("preview-stale"), !!state.proxy && state.previewStale);
+    if (state.ui && state.ui.previewMode === "loupe") return; // the loupe writes its own caption
     $("preview-source").textContent = state.proxy ? "Источник: " + state.proxyLabel : "";
   }
 
@@ -456,6 +534,7 @@
 
   function renderPreviewNow(draft) {
     if (!state.proxy) return;
+    if (state.ui.previewMode === "loupe") return; // only the visible view is computed
     var keyNow = renderKey();
     if (!draft && keyNow === state.lastFullKey) return; // already showing this full render
     var t0 = nowMs();
@@ -504,7 +583,8 @@
     }
   }
 
-  async function displayPreview(img) {
+  // fit: displayed size { w, h } in CSS px (the loupe); default: the proxy fitted to the box.
+  async function displayPreview(img, fit) {
     var seq = ++state.displaySeq;
     var url = null;
     var how = null;
@@ -540,25 +620,43 @@
     if (old) {
       try { URL.revokeObjectURL(old); } catch (e) { /* already revoked */ }
     }
-    // Draft (half-size) and full images are scaled into the same box: the proxy's.
-    sizePreview(state.proxy ? state.proxy.width : img.width, state.proxy ? state.proxy.height : img.height);
+    if (fit) {
+      setImgSize(fit.w, fit.h);
+    } else {
+      // Draft (half-size) and full images are scaled into the same box: the proxy's.
+      sizePreview(state.proxy ? state.proxy.width : img.width, state.proxy ? state.proxy.height : img.height);
+    }
+    updateFrameOverlay();
     show($("preview-placeholder"), false);
     show(el, true);
     updateStaleLabel();
     return how;
   }
 
-  function sizePreview(w, h) {
+  /** Inner size of the fixed preview box in CSS px. */
+  function boxSize() {
     var wrap = $("preview-wrap");
-    var cw = Math.max(120, (wrap && wrap.clientWidth ? wrap.clientWidth : 260) - 2);
-    var scale = Math.min(cw / w, 320 / h);
+    return { w: Math.max(120, (wrap && wrap.clientWidth ? wrap.clientWidth : 280) - 2), h: PREVIEW_BOX_H - 2 };
+  }
+
+  function fitToBox(w, h) {
+    var b = boxSize();
+    var scale = Math.min(b.w / w, b.h / h);
+    return { w: Math.max(1, Math.round(w * scale)), h: Math.max(1, Math.round(h * scale)) };
+  }
+
+  function setImgSize(dw, dh) {
     var el = $("preview-img");
-    var dw = Math.max(1, Math.round(w * scale));
-    var dh = Math.max(1, Math.round(h * scale));
     el.width = dw;
     el.height = dh;
     el.style.width = dw + "px";
     el.style.height = dh + "px";
+  }
+
+  function sizePreview(w, h) {
+    var f = fitToBox(w, h);
+    setImgSize(f.w, f.h);
+    state.previewDisplay = f;
   }
 
   async function rebuildPreview(reason) {
@@ -580,6 +678,8 @@
     }
     if (rep.blocking.length || rep.nothingToDo) setBusy(false);
     diag.set("target", rep);
+    updateFromLayer(rep.activeLayer);
+    updateMaskCheckbox(rep.selection);
     if (rep.blocking.length) {
       state.proxy = null;
       updateStaleLabel();
@@ -614,6 +714,13 @@
       state.proxyLabel = res.label;
       state.previewStale = false;
       state.lastFullKey = null;
+      // The loupe reads the same source; its cache belongs to the old one.
+      var c = state.loupe.center;
+      if (c && !(c.x >= plan.area.left && c.x < plan.area.right && c.y >= plan.area.top && c.y < plan.area.bottom)) {
+        state.loupe.center = null;
+      }
+      state.previewPlan = plan;
+      state.loupe.raw = null;
       diag.set("preview", res.stats);
       diag.log("Предпросмотр построен (" + reason + "): " + res.stats.proxySize + ", " + Math.round(res.stats.timings.total) + " мс");
       progressEl.textContent = "Пересчитываю…";
@@ -621,7 +728,8 @@
       setTimeout(function () {
         show(progressEl, false);
         clearPreviewTimers();
-        renderPreviewNow(false);
+        if (state.ui.previewMode === "loupe") updateLoupe(true, reason);
+        else renderPreviewNow(false);
       }, 0);
     } catch (e) {
       show(progressEl, false);
@@ -638,6 +746,409 @@
       setBusy(false);
       updateStaleLabel();
     }
+  }
+
+  // ------------------------------------------------------------------ loupe (v1.1)
+  // A full-resolution region around a chosen point. The raw pixels (view + halo margin)
+  // are read once per centre / document / layer; every setting change re-runs
+  // core.processImage on the cached pixels, so a halo a few pixels wide can be judged.
+
+  function loupeZoom() {
+    return state.ui.zoom === 2 ? 2 : 1;
+  }
+
+  function rectW(r) { return r.right - r.left; }
+  function rectH(r) { return r.bottom - r.top; }
+
+  function rectContains(outer, inner) {
+    return !!outer && !!inner && outer.left <= inner.left && outer.top <= inner.top &&
+      outer.right >= inner.right && outer.bottom >= inner.bottom;
+  }
+
+  function regionRect(region) {
+    return { left: region.left, top: region.top, right: region.left + region.width, bottom: region.top + region.height };
+  }
+
+  /** Document rectangle the loupe shows: (box size)/zoom around the centre, inside the work area. */
+  function loupeViewRect() {
+    var plan = state.previewPlan;
+    if (!plan || !state.loupe.center) return null;
+    var a = plan.area, b = boxSize(), z = loupeZoom();
+    var rw = Math.max(1, Math.min(Math.floor(b.w / z), rectW(a)));
+    var rh = Math.max(1, Math.min(Math.floor(b.h / z), rectH(a)));
+    var left = Math.round(state.loupe.center.x - rw / 2);
+    var top = Math.round(state.loupe.center.y - rh / 2);
+    left = Math.max(a.left, Math.min(a.right - rw, left));
+    top = Math.max(a.top, Math.min(a.bottom - rh, top));
+    return { left: left, top: top, right: left + rw, bottom: top + rh };
+  }
+
+  function loupeMarginNow() {
+    var m = Number(core.loupeMargin(state.settings, state.proxyDocLongSide || 1));
+    return isFinite(m) && m > 0 ? Math.ceil(m) : 0;
+  }
+
+  /** The view plus the halo margin, clamped to the work area; the start is aligned to a
+   *  64-px grid from the area origin, like the full apply's pyramid blocks. */
+  function loupeReadRect(view, margin) {
+    var a = state.previewPlan.area;
+    var left = Math.max(a.left, view.left - margin);
+    var top = Math.max(a.top, view.top - margin);
+    left = a.left + Math.floor((left - a.left) / LOUPE_ALIGN) * LOUPE_ALIGN;
+    top = a.top + Math.floor((top - a.top) / LOUPE_ALIGN) * LOUPE_ALIGN;
+    return {
+      left: left,
+      top: top,
+      right: Math.min(a.right, view.right + margin),
+      bottom: Math.min(a.bottom, view.bottom + margin)
+    };
+  }
+
+  /** Copy a sub-rectangle out of a cached region. */
+  function cropRegion(region, rect) {
+    var c = region.components;
+    var w = rectW(rect), h = rectH(rect);
+    if (rect.left === region.left && rect.top === region.top && w === region.width && h === region.height) {
+      return { data: region.data, components: c, width: w, height: h };
+    }
+    var out = new Uint8Array(w * h * c);
+    for (var y = 0; y < h; y++) {
+      var s = ((rect.top - region.top + y) * region.width + (rect.left - region.left)) * c;
+      out.set(region.data.subarray(s, s + w * c), y * w * c);
+    }
+    return { data: out, components: c, width: w, height: h };
+  }
+
+  /** Crop to the view, flatten alpha over a checkerboard, enlarge by zoom (nearest). */
+  function loupeDisplayRgb(data, comps, srcW, srcRect, view, zoom) {
+    var vw = rectW(view), vh = rectH(view);
+    var W = vw * zoom, H = vh * zoom;
+    var out = new Uint8Array(W * H * 3);
+    for (var y = 0; y < H; y++) {
+      var dyDoc = Math.floor(y / zoom);
+      var sy = view.top - srcRect.top + dyDoc;
+      for (var x = 0; x < W; x++) {
+        var dxDoc = Math.floor(x / zoom);
+        var s = (sy * srcW + (view.left - srcRect.left + dxDoc)) * comps;
+        var d = (y * W + x) * 3;
+        if (comps === 4 && data[s + 3] < 255) {
+          var a = data[s + 3] / 255;
+          var bg = ((((view.left + dxDoc) >> 3) + ((view.top + dyDoc) >> 3)) & 1) ? 150 : 104;
+          out[d] = Math.round(data[s] * a + bg * (1 - a));
+          out[d + 1] = Math.round(data[s + 1] * a + bg * (1 - a));
+          out[d + 2] = Math.round(data[s + 2] * a + bg * (1 - a));
+        } else {
+          out[d] = data[s];
+          out[d + 1] = data[s + 1];
+          out[d + 2] = data[s + 2];
+        }
+      }
+    }
+    return { data: out, width: W, height: H };
+  }
+
+  function scheduleLoupe(stage) {
+    if (state.ui.previewMode !== "loupe") return;
+    if (state.loupe.timer) clearTimeout(state.loupe.timer);
+    state.loupe.timer = setTimeout(function () {
+      state.loupe.timer = null;
+      updateLoupe(stage !== "draft", "настройки");
+    }, LOUPE_DEBOUNCE_MS);
+  }
+
+  /* Render the loupe from the cache. Read from Photoshop only when allowRead is set and
+   * the cache does not cover the view plus the current margin (new centre, zoom ×1,
+   * larger blur). While a control is dragged (allowRead false) an uncovered margin is
+   * read on the final change. */
+  async function updateLoupe(allowRead, reason) {
+    if (state.ui.previewMode !== "loupe") return;
+    var plan = state.previewPlan;
+    if (!plan) {
+      setPreviewPlaceholder("Лупа появится после построения предпросмотра — нажмите «Обновить».");
+      return;
+    }
+    if (!state.loupe.center) {
+      state.loupe.center = { x: (plan.area.left + plan.area.right) / 2, y: (plan.area.top + plan.area.bottom) / 2 };
+    }
+    var view = loupeViewRect();
+    var need = loupeReadRect(view, loupeMarginNow());
+    var raw = state.loupe.raw;
+    var covered = !!raw && rectContains(regionRect(raw), need);
+    if (!covered) {
+      if (allowRead) {
+        if (!(await readLoupe(need, reason))) return;
+      } else if (!raw || !rectContains(regionRect(raw), view)) {
+        state.loupe.needsRead = true;
+        return;
+      } else {
+        state.loupe.needsRead = true; // draw with the margin we have; read on the final change
+      }
+    }
+    renderLoupe(view, need);
+  }
+
+  async function readLoupe(rect, reason) {
+    if (!state.bridge || state.busy) return false;
+    setBusy(true, "Лупа…");
+    var progressEl = $("preview-progress");
+    progressEl.textContent = "Читаю область для лупы…";
+    show(progressEl, true);
+    try {
+      var region = await state.bridge.readRegion({ plan: state.previewPlan, rect: rect });
+      state.loupe.raw = region;
+      state.loupe.needsRead = false;
+      diag.set("loupe", region.stats);
+      diag.log("Лупа: прочитано " + region.width + "×" + region.height + " с (" + region.left + ", " + region.top + ") — " + (reason || ""));
+      return true;
+    } catch (e) {
+      var d = Bridge.describeError(e);
+      if (d.kind === "cancelled") diag.log("Чтение для лупы отменено");
+      else diag.error(e, "лупа: readRegion");
+      diag.set("loupe", e && e.halationStats ? e.halationStats : null);
+      setPreviewPlaceholder(d.kind === "busy" ? "Photoshop занят — лупа не построена. Нажмите «Обновить», когда он освободится." : d.text);
+      return false;
+    } finally {
+      show(progressEl, false);
+      setBusy(false);
+    }
+  }
+
+  function renderLoupe(view, need) {
+    var raw = state.loupe.raw;
+    var have = regionRect(raw);
+    var proc = {
+      left: Math.max(need.left, have.left),
+      top: Math.max(need.top, have.top),
+      right: Math.min(need.right, have.right),
+      bottom: Math.min(need.bottom, have.bottom)
+    };
+    var src = cropRegion(raw, proc);
+    var v = state.ui.view;
+    var t0 = nowMs();
+    var out;
+    try {
+      out = v === "before" ? src.data : core.processImage(src.data, src.width, src.height, src.components, state.settings, {
+        originX: proc.left,
+        originY: proc.top,
+        docLongSide: state.proxyDocLongSide,
+        view: v === "halo" ? "halo" : "after"
+      });
+    } catch (e) {
+      diag.error(e, "лупа: processImage");
+      setPreviewPlaceholder("Ошибка расчёта лупы — см. «Диагностика».");
+      return;
+    }
+    var ms = nowMs() - t0;
+    var img = loupeDisplayRgb(out, src.components, src.width, proc, view, loupeZoom());
+    var p = diag.info.loupe;
+    if (p) {
+      p.renderMs = ms;
+      p.proxySize = src.width + "×" + src.height + " (обработка), вид " + rectW(view) + "×" + rectH(view);
+      diag.set("loupe", p);
+    }
+    $("preview-source").textContent = "Лупа ×" + loupeZoom() + ": x " + view.left + "–" + view.right + ", y " + view.top + "–" + view.bottom +
+      " (" + (state.proxyLabel || "") + ")";
+    displayPreview(img, { w: img.width, h: img.height });
+  }
+
+  function updateFrameOverlay() {
+    var fr = $("loupe-frame");
+    if (!fr) return;
+    var plan = state.previewPlan, d = state.previewDisplay;
+    if (state.ui.previewMode !== "frame" || !state.loupe.center || !plan || !d || !state.proxy) {
+      show(fr, false);
+      return;
+    }
+    var view = loupeViewRect();
+    var a = plan.area;
+    var wrap = $("preview-wrap");
+    var cw = wrap && wrap.clientWidth ? wrap.clientWidth : d.w + 2;
+    var sx = d.w / rectW(a), sy = d.h / rectH(a);
+    var offX = (cw - d.w) / 2, offY = (PREVIEW_BOX_H - d.h) / 2; // the image is centred in the box
+    fr.style.left = Math.round(offX + (view.left - a.left) * sx) + "px";
+    fr.style.top = Math.round(offY + (view.top - a.top) * sy) + "px";
+    fr.style.width = Math.max(3, Math.round(rectW(view) * sx)) + "px";
+    fr.style.height = Math.max(3, Math.round(rectH(view) * sy)) + "px";
+    show(fr, true);
+  }
+
+  function renderPreviewMode() {
+    var mode = state.ui.previewMode;
+    setRadio($("preview-mode-group"), mode);
+    setRadio($("zoom-group"), String(loupeZoom()));
+    show($("zoom-group"), mode === "loupe");
+    $("loupe-hint").textContent = mode === "loupe"
+      ? "Лупа 1:1. Другое место — в режиме «Кадр» щёлкните по картинке."
+      : "В режиме «Кадр» щёлкните по картинке — там откроется лупа 1:1.";
+    updateFrameOverlay();
+  }
+
+  function setPreviewMode(mode, reason) {
+    if (mode !== "frame" && mode !== "loupe") return;
+    updateUi({ previewMode: mode });
+    renderPreviewMode();
+    if (mode === "loupe") {
+      updateLoupe(true, reason || "режим «Лупа»");
+    } else {
+      clearPreviewTimers();
+      state.lastFullKey = null;
+      if (state.proxy) renderPreviewNow(false);
+      updateStaleLabel();
+    }
+  }
+
+  /** Click on the frame thumbnail: the loupe centre in document coordinates. */
+  function onPreviewClick(e) {
+    if (state.ui.previewMode !== "frame" || !state.previewPlan || !state.previewDisplay || !state.proxy) return;
+    var img = $("preview-img");
+    var r = img.getBoundingClientRect();
+    var w = r.width || state.previewDisplay.w, h = r.height || state.previewDisplay.h;
+    var fx = (e.clientX - r.left) / w, fy = (e.clientY - r.top) / h;
+    if (!(fx >= 0 && fx <= 1 && fy >= 0 && fy <= 1)) return;
+    var a = state.previewPlan.area;
+    state.loupe.center = { x: a.left + fx * rectW(a), y: a.top + fy * rectH(a) };
+    state.loupe.raw = null; // new centre: read again
+    diag.log("Лупа: центр (" + Math.round(state.loupe.center.x) + ", " + Math.round(state.loupe.center.y) + ")");
+    setPreviewMode("loupe", "щелчок по кадру");
+  }
+
+  // ------------------------------------------------------------------ presets and settings from a layer (v1.1)
+
+  function presetEntries() {
+    var out = [];
+    (Array.isArray(core.LOOKS) ? core.LOOKS : []).forEach(function (l) {
+      out.push({ value: "look:" + l.id, name: l.name, description: l.description || "", settings: l.settings, builtIn: true });
+    });
+    state.presets.forEach(function (p) {
+      out.push({ value: "user:" + p.name, name: p.name, description: "Свой пресет", settings: p.settings, builtIn: false });
+    });
+    return out;
+  }
+
+  function findPreset(value) {
+    var all = presetEntries();
+    for (var i = 0; i < all.length; i++) if (all[i].value === value) return all[i];
+    return null;
+  }
+
+  function buildPresetMenu() {
+    var menu = $("preset-menu");
+    menu.innerHTML = "";
+    presetEntries().forEach(function (e) {
+      var it = document.createElement("sp-menu-item");
+      it.setAttribute("value", e.value);
+      it.textContent = e.builtIn ? e.name : "★ " + e.name;
+      if (e.value === state.presetValue) it.setAttribute("selected", "");
+      menu.appendChild(it);
+    });
+    renderPresetSelection();
+  }
+
+  // Selected value: the item the event came from, the picker's value or selectedIndex,
+  // else an item marked selected (exact sp-picker behaviour in UXP is uncertain).
+  function pickerValue(evt) {
+    var picker = $("preset-picker");
+    var items = $("preset-menu").querySelectorAll("sp-menu-item");
+    var values = [];
+    for (var i = 0; i < items.length; i++) values.push(items[i].getAttribute("value"));
+    var t = evt && evt.target;
+    if (t && t.tagName && String(t.tagName).toLowerCase() === "sp-menu-item" && values.indexOf(t.getAttribute("value")) >= 0) {
+      return t.getAttribute("value");
+    }
+    if (typeof picker.value === "string" && values.indexOf(picker.value) >= 0) return picker.value;
+    if (typeof picker.selectedIndex === "number" && picker.selectedIndex >= 0 && picker.selectedIndex < items.length) {
+      return values[picker.selectedIndex];
+    }
+    for (var j = 0; j < items.length; j++) if (items[j].selected) return values[j];
+    return null;
+  }
+
+  function renderPresetSelection() {
+    var p = state.presetValue ? findPreset(state.presetValue) : null;
+    $("preset-description").textContent = p ? p.description : "";
+    setDisabled($("btn-preset-delete"), !(p && !p.builtIn));
+    setDisabled($("btn-preset-load"), !p);
+  }
+
+  /** Put a full settings object into the panel (preset, layer name). */
+  function loadSettings(settings, label) {
+    state.settings = core.normalizeSettings(settings);
+    if (state.editor) state.editor.setPoints(state.settings.curvePoints, { silent: true });
+    applyStateToControls();
+    scheduleSave();
+    state.lastFullKey = null;
+    scheduleRender("full");
+    diag.log("Загружены настройки: " + label);
+    setMessage("preset-message", "Загружено: " + label + ".");
+  }
+
+  function onPresetLoad() {
+    var p = state.presetValue ? findPreset(state.presetValue) : null;
+    if (!p) {
+      setMessage("preset-message", "Сначала выберите пресет в списке.");
+      return;
+    }
+    loadSettings(p.settings, "пресет «" + p.name + "»");
+  }
+
+  function onPresetSave() {
+    var name = Store.cleanName($("preset-name").value);
+    var res = state.store.savePreset(name, state.settings);
+    if (!res.ok) {
+      setMessage("preset-message", res.reason || "Не удалось сохранить пресет.");
+      return;
+    }
+    state.presets = res.presets;
+    state.presetValue = "user:" + res.name;
+    buildPresetMenu();
+    show($("preset-save-row"), false);
+    setMessage("preset-message", "Пресет «" + res.name + "» сохранён.");
+    diag.log("Сохранён пресет «" + res.name + "»");
+  }
+
+  function onPresetDelete() {
+    var p = state.presetValue ? findPreset(state.presetValue) : null;
+    if (!p || p.builtIn) return;
+    var res = state.store.deletePreset(p.name);
+    state.presets = res.presets;
+    state.presetValue = null;
+    buildPresetMenu();
+    setMessage("preset-message", res.ok ? "Пресет «" + p.name + "» удалён." : "Не удалось удалить пресет.");
+  }
+
+  /** «Взять настройки из слоя»: shown when the active layer's name carries settings. */
+  function updateFromLayer(info) {
+    state.layerSettings = info && info.settingsFromName ? { settings: info.settingsFromName, name: info.name } : null;
+    show($("from-layer-row"), !!state.layerSettings);
+  }
+
+  function maskOn() {
+    return state.maskChoice === null ? true : !!state.maskChoice;
+  }
+
+  /** «Только в выделении»: visible while the document has a selection, on by default. */
+  function updateMaskCheckbox(selection) {
+    var box = $("mask-checkbox");
+    show(box, !!selection);
+    box.checked = maskOn();
+    if (maskOn()) box.setAttribute("checked", "");
+    else box.removeAttribute("checked");
+  }
+
+  // Cheap reads after document events: active layer name and selection (no modal scope).
+  var peekTimer = null;
+  function schedulePeek() {
+    if (!state.bridge || peekTimer) return;
+    peekTimer = setTimeout(async function () {
+      peekTimer = null;
+      try {
+        var p = await state.bridge.peek();
+        updateFromLayer(p.activeLayer);
+        updateMaskCheckbox(p.selection);
+      } catch (e) {
+        diag.log("Не удалось прочитать активный слой: " + e.message);
+      }
+    }, 300);
   }
 
   // ------------------------------------------------------------------ apply
@@ -688,6 +1199,11 @@
       }
       var preflightMs = nowMs() - t0;
       diag.set("target", rep);
+      updateFromLayer(rep.activeLayer);
+      updateMaskCheckbox(rep.selection);
+      if (rep.selection && maskOn()) {
+        rep.notes.push("Есть выделение: эффект останется только в нём (маска слоя). Чтобы обработать всё, снимите «Только в выделении».");
+      }
       if (rep.blocking.length) {
         showStatus("error", rep.blocking.join(" "));
         return;
@@ -730,11 +1246,13 @@
     showStatus("info", head);
     var lastPct = -1;
     var t0 = nowMs();
+    var useMask = !!(rep && rep.selection) && maskOn();
     try {
       var res = await state.bridge.apply({
         settings: state.settings,
         plan: plan,
         preflightMs: preflightMs,
+        maskToSelection: useMask,
         onProgress: function (value, stage) {
           var pct = Math.floor(value * 100);
           if (pct === lastPct) return;
@@ -755,7 +1273,8 @@
           " полос(ы) Photoshop не отдал и они сочтены прозрачными. Если там слой не прозрачный, результат неполный: " +
           "отмените (Cmd/Ctrl+Z) и примените ещё раз. Подробности — в «Диагностике».");
       } else {
-        showStatus("ok", "Готово за " + sec + " с: создан слой «Halation» " + placed + removed);
+        showStatus("ok", "Готово за " + sec + " с: создан слой Halation " + placed + removed +
+          (useMask ? " Маска слоя — по выделению." : ""));
       }
     } catch (e) {
       var d = Bridge.describeError(e);
@@ -770,7 +1289,9 @@
 
   function onDocChange(eventName) {
     if (state.busy || nowMs() < state.quietUntil) return;
+    // The frame cache and the loupe cache stay until «Обновить» (or a new loupe centre).
     markStale("событие «" + eventName + "»");
+    schedulePeek();
     if (state.pendingConfirm) {
       hideConfirm();
       showStatus("warn", "Документ изменился — нажмите «Применить» ещё раз.");
@@ -888,25 +1409,71 @@
       $(id).addEventListener("change", function () { onHsvEvent("full"); });
     });
 
-    function sliderHandler(id, field) {
+    function sliderHandler(id, toPatch) {
       function handler(stage) {
-        var patch = {};
-        patch[field] = Number($(id).value);
-        updateSettings(patch, stage);
+        updateSettings(toPatch(Number($(id).value)), stage);
         renderSliderLabels();
       }
       $(id).addEventListener("input", function () { handler("draft"); });
       $(id).addEventListener("change", function () { handler("full"); });
     }
-    sliderHandler("blur-slider", "blur");
-    sliderHandler("strength-slider", "strength");
+    sliderHandler("blur-slider", function (u) { return { blurMul: core.blurFromSlider(u) }; });
+    sliderHandler("strength-slider", function (v) { return { strength: v }; });
+    sliderHandler("threshold-slider", function (v) { return { threshold: Math.round(v) }; });
+    sliderHandler("softness-slider", function (v) { return { softness: Math.round(v) }; });
+
+    Object.keys(NUMBER_FIELDS).forEach(function (id) {
+      $(id).addEventListener("change", function () { commitNumberField(id); });
+      $(id).addEventListener("keydown", function (e) {
+        if (e && (e.key === "Enter" || e.keyCode === 13)) commitNumberField(id);
+      });
+    });
+
+    // preview: frame / loupe, zoom, click on the thumbnail
+    $("preview-mode-group").addEventListener("change", function (e) {
+      setPreviewMode(radioValue($("preview-mode-group"), e), "переключатель");
+    });
+    $("zoom-group").addEventListener("change", function (e) {
+      var z = Number(radioValue($("zoom-group"), e));
+      if (z !== 1 && z !== 2) return;
+      updateUi({ zoom: z });
+      renderPreviewMode();
+      updateLoupe(true, "масштаб ×" + z);
+    });
+    $("preview-img").addEventListener("click", onPreviewClick);
+
+    // presets
+    $("preset-picker").addEventListener("change", function (e) {
+      state.presetValue = pickerValue(e);
+      renderPresetSelection();
+    });
+    $("btn-preset-load").addEventListener("click", onPresetLoad);
+    $("btn-preset-save").addEventListener("click", function () {
+      show($("preset-save-row"), true);
+      setMessage("preset-message", "");
+      try { $("preset-name").focus(); } catch (err) { /* focus unsupported */ }
+    });
+    $("btn-preset-save-ok").addEventListener("click", onPresetSave);
+    $("preset-name").addEventListener("keydown", function (e) {
+      if (e && (e.key === "Enter" || e.keyCode === 13)) onPresetSave();
+    });
+    $("btn-preset-save-cancel").addEventListener("click", function () { show($("preset-save-row"), false); });
+    $("btn-preset-delete").addEventListener("click", onPresetDelete);
+    $("btn-from-layer").addEventListener("click", function () {
+      var l = state.layerSettings;
+      if (l) loadSettings(l.settings, "слой «" + (l.name.length > 40 ? l.name.slice(0, 40) + "…" : l.name) + "»");
+    });
+
+    $("mask-checkbox").addEventListener("change", function () {
+      state.maskChoice = !!$("mask-checkbox").checked;
+    });
 
     $("view-group").addEventListener("change", function (e) {
       var v = radioValue($("view-group"), e);
       if (v !== "before" && v !== "after" && v !== "halo") return;
       updateUi({ view: v });
       renderView();
-      schedulePreview("full");
+      scheduleRender("full");
     });
 
     $("btn-refresh").addEventListener("click", function () { rebuildPreview("кнопка «Обновить»"); });
@@ -932,12 +1499,22 @@
     $("diag-toggle").addEventListener("click", function () { toggleDiag(); });
     $("btn-copy-report").addEventListener("click", copyReport);
 
+    // Width changes under RESIZE_MIN_DELTA px are ignored: tiny layout jitter must not
+    // resize (and clear) the curve canvas (v1.1 flicker fix).
     var resizeTimer = null;
     window.addEventListener("resize", function () {
       if (resizeTimer) clearTimeout(resizeTimer);
       resizeTimer = setTimeout(function () {
+        var wrap = $("preview-wrap");
+        var width = (typeof window.innerWidth === "number" && window.innerWidth) || (wrap && wrap.clientWidth) || 0;
+        if (state.lastWindowWidth !== null && Math.abs(width - state.lastWindowWidth) < RESIZE_MIN_DELTA) return;
+        state.lastWindowWidth = width;
         if (state.settings.mode === "curve" && state.editor) state.editor.resize();
-        if (state.proxy) sizePreview(state.proxy.width, state.proxy.height);
+        if (state.ui.previewMode === "loupe") updateLoupe(true, "размер панели");
+        else if (state.proxy) {
+          sizePreview(state.proxy.width, state.proxy.height);
+          updateFrameOverlay();
+        }
       }, 120);
     });
   }
@@ -954,6 +1531,7 @@
     else $("replace-checkbox").removeAttribute("checked");
     $("k-field").value = state.ui.k;
     setRadio($("axis-group"), state.ui.yAxis);
+    renderPreviewMode();
   }
 
   // ------------------------------------------------------------------ start-up
@@ -981,6 +1559,12 @@
       state.settings = loaded.settings;
       state.ui = loaded.ui;
       if (loaded.error) diag.log("Сохранённые настройки не прочитаны, взяты значения по умолчанию: " + loaded.error.message);
+      if (loaded.migratedFrom) {
+        // v1.0 record: blur 0..100 became blurMul; keep the converted values right away.
+        state.store.save(state.settings, state.ui);
+        diag.log("Настройки версии 1.0 перенесены в схему " + Store.SCHEMA);
+      }
+      state.presets = state.store.loadPresets();
       diag.set("settings", state.settings);
 
       if (photoshop) {
@@ -998,6 +1582,8 @@
 
       buildPresets();
       bindControls();
+      buildPresetMenu();
+      state.lastWindowWidth = typeof window.innerWidth === "number" ? window.innerWidth : null;
       createEditor();
       applyStateToControls();
       applyTheme();

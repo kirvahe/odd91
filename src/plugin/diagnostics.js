@@ -55,6 +55,7 @@
       target: null,
       apply: null,
       preview: null,
+      loupe: null,
       colorRaw: null,
       colorParsed: null,
       lastError: null,
@@ -151,6 +152,9 @@
         "; терпимых ошибок чтения " + (s.toleratedErrors || 0));
       if (s.toleratedMessages && s.toleratedMessages.length) out.push("  Ошибки пустых полос: " + s.toleratedMessages.join(" | "));
       if (s.layerOrder) out.push("  Порядок слоёв (до → после): " + safeJson(s.layerOrder));
+      if (s.layerName) out.push("  Имя слоя: " + s.layerName);
+      if (s.mask) out.push("  Маска из выделения: " + safeJson(s.mask));
+      if (s.hiddenDuringRead && s.hiddenDuringRead.length) out.push("  Скрыты на время чтения: " + safeJson(s.hiddenDuringRead));
       if (s.coreStats) out.push("  Ядро: " + safeJson(s.coreStats, 1500));
       if (s.renderMs !== undefined || s.draftMs !== undefined) {
         out.push("  Пересчёт предпросмотра: полный " + fmtMs(s.renderMs) + ", черновик " + fmtMs(s.draftMs) +
@@ -168,6 +172,7 @@
       Array.prototype.push.apply(lines, targetLines());
       Array.prototype.push.apply(lines, statsLines("Последнее применение", info.apply));
       Array.prototype.push.apply(lines, statsLines("Предпросмотр", info.preview));
+      Array.prototype.push.apply(lines, statsLines("Лупа", info.loupe));
       lines.push("Настройки: " + (info.settings ? safeJson(info.settings, 1200) : "—"));
       lines.push("Палитра цвета, сырой ответ: " + (info.colorRaw !== null ? safeJson(info.colorRaw) : "—"));
       if (info.colorParsed) lines.push("Палитра цвета, разбор: " + safeJson(info.colorParsed));

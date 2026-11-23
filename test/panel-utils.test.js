@@ -20,14 +20,63 @@ test("settings: round trip with a schema version", () => {
   const storage = memoryStorage();
   const store = Store.create({ storage, core });
   const s = core.normalizeSettings({ mode: "curve", strength: 70, color: [255, 89, 25] });
-  assert.equal(store.save(s, { yAxis: "log", view: "halo", replace: false, k: "0.1", diagOpen: true }), true);
+  const ui = { yAxis: "log", view: "halo", previewMode: "loupe", zoom: 2, replace: false, k: "0.1", diagOpen: true };
+  assert.equal(store.save(s, ui), true);
   const saved = JSON.parse(storage.raw.get(Store.KEY));
   assert.equal(saved.schema, Store.SCHEMA);
   const loaded = store.load();
   assert.equal(loaded.error, null);
   assert.equal(loaded.fromStorage, true);
   assert.deepEqual(loaded.settings, s);
-  assert.deepEqual(loaded.ui, { yAxis: "log", view: "halo", replace: false, k: "0.1", diagOpen: true });
+  assert.deepEqual(loaded.ui, ui);
+  assert.equal(loaded.migratedFrom, null);
+});
+
+test("settings: a v1.0 record (schema 1, blur 0..100) is migrated and keeps the user's values", () => {
+  const v10 = {
+    schema: 1,
+    settings: { mode: "curve", blur: 75, strength: 60, color: [255, 89, 25], curvePoints: [[128, 0.2]] },
+    ui: { yAxis: "log", view: "halo", replace: false, k: "0.25", diagOpen: false },
+  };
+  const storage = memoryStorage({ [Store.KEY]: JSON.stringify(v10) });
+  const store = Store.create({ storage, core });
+  const loaded = store.load();
+  assert.equal(loaded.error, null);
+  assert.equal(loaded.migratedFrom, 1);
+  assert.ok(Math.abs(loaded.settings.blurMul - Math.pow(2, (75 - 50) / 25)) < 1e-9, "blur 75 -> x2");
+  assert.equal("blur" in loaded.settings, false);
+  assert.equal(loaded.settings.strength, 60);
+  assert.equal(loaded.settings.mode, "curve");
+  assert.deepEqual(loaded.settings.color, [255, 89, 25]);
+  assert.deepEqual(loaded.settings.curvePoints, [[128, 0.2]]);
+  assert.equal(loaded.ui.yAxis, "log");
+  assert.equal(loaded.ui.k, "0.25");
+  // saved again as schema 2
+  store.save(loaded.settings, loaded.ui);
+  assert.equal(JSON.parse(storage.raw.get(Store.KEY)).schema, 2);
+  assert.equal(store.load().migratedFrom, null);
+});
+
+test("presets: save, overwrite by name, load and delete in localStorage", () => {
+  const storage = memoryStorage();
+  const store = Store.create({ storage, core });
+  assert.deepEqual(store.loadPresets(), []);
+  const a = core.normalizeSettings({ strength: 120, threshold: 200, softness: 10 });
+  let r = store.savePreset("  Мой   свет ", a);
+  assert.equal(r.ok, true);
+  assert.equal(r.name, "Мой свет");
+  r = store.savePreset("Другой", core.normalizeSettings({ blurMul: 0.05 }));
+  r = store.savePreset("мой свет", core.normalizeSettings({ strength: 7 })); // same name, other case: overwrite
+  const list = store.loadPresets();
+  assert.deepEqual(list.map((p) => p.name), ["Другой", "мой свет"]);
+  assert.equal(list[1].settings.strength, 7);
+  assert.ok(Math.abs(list[0].settings.blurMul - 0.05) < 1e-12);
+  assert.equal(store.savePreset("   ", a).ok, false);
+  assert.equal(store.deletePreset("Другой").ok, true);
+  assert.deepEqual(store.loadPresets().map((p) => p.name), ["мой свет"]);
+  assert.equal(store.deletePreset("нет такого").ok, false);
+  // a corrupt presets record reads as an empty list
+  assert.deepEqual(Store.create({ storage: memoryStorage({ [Store.PRESETS_KEY]: "{oops" }), core }).loadPresets(), []);
 });
 
 test("settings: corrupt JSON, another schema or missing storage fall back to normalizeSettings defaults", () => {
@@ -43,10 +92,11 @@ test("settings: corrupt JSON, another schema or missing storage fall back to nor
   assert.equal(none.save(defaults, {}), false);
   // out-of-range values are clamped by the core, unknown UI values dropped
   const odd = Store.create({
-    storage: memoryStorage({ [Store.KEY]: JSON.stringify({ schema: 1, settings: { strength: 500 }, ui: { view: "weird" } }) }),
+    storage: memoryStorage({ [Store.KEY]: JSON.stringify({ schema: 2, settings: { strength: 500 }, ui: { view: "weird", zoom: 3 } }) }),
     core,
   }).load();
-  assert.equal(odd.settings.strength, 100);
+  assert.equal(odd.settings.strength, 400);
+  assert.equal(odd.ui.zoom, 1);
   assert.equal(odd.ui.view, "after");
 });
 

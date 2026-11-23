@@ -34,6 +34,8 @@ function createFakePhotoshop(opts = {}) {
     suspend: [],
     resume: [],
     visibility: [],
+    getSelection: [],
+    putLayerMask: [],
     history: [], // committed history steps: { name, before: snapshot }
     rollbacks: 0,
     commits: 0,
@@ -146,7 +148,13 @@ function createFakePhotoshop(opts = {}) {
     colorProfileName: profile,
     layers: [], // top first
     _active: [],
+    _selection: opts.selection || null, // { left, top, right, bottom }: a hard-edged rectangle
   };
+  Object.defineProperty(doc, "selection", {
+    get() {
+      return { bounds: doc._selection ? { ...doc._selection } : null };
+    },
+  });
   Object.defineProperty(doc, "activeLayers", {
     get() {
       return doc._active.map((id) => doc.layers.find((l) => l.id === id)).filter(Boolean);
@@ -315,11 +323,49 @@ function createFakePhotoshop(opts = {}) {
     async encodeImageData() {
       return "QkFTRTY0";
     },
+
+    // Selection as 1-component grayscale, trimmed to the selection inside sourceBounds.
+    async getSelection(o) {
+      guard("getSelection");
+      log.getSelection.push(JSON.parse(JSON.stringify(o)));
+      const sel = doc._selection;
+      const sb = o.sourceBounds || { left: 0, top: 0, right: W, bottom: H };
+      const r = sel && {
+        left: Math.max(sel.left, sb.left),
+        top: Math.max(sel.top, sb.top),
+        right: Math.min(sel.right, sb.right),
+        bottom: Math.min(sel.bottom, sb.bottom),
+      };
+      if (!r || r.right <= r.left || r.bottom <= r.top) return { imageData: null, sourceBounds: null };
+      const w = r.right - r.left, h = r.bottom - r.top;
+      const img = makeImageData(w, h, 1, new Uint8Array(w * h).fill(255));
+      img.colorSpace = "Grayscale";
+      return { imageData: img, sourceBounds: r };
+    },
+
+    // A new mask reveals everything (255) until written, so a partial write shows up.
+    async putLayerMask(o) {
+      guard("putLayerMask");
+      if (!modal.active) throw new Error("putLayerMask requires a modal scope");
+      const l = findLayer(o.layerID);
+      if (!l) throw new Error("putLayerMask: no such layer");
+      const img = o.imageData;
+      if (img._disposed) throw new Error("putLayerMask: imageData already disposed");
+      if (img.components !== 1) throw new Error("putLayerMask: grayscale data expected");
+      const data = await img.getData();
+      const tb = o.targetBounds || { left: 0, top: 0 };
+      log.putLayerMask.push({ layerID: o.layerID, targetBounds: { ...tb }, width: img.width, height: img.height, replace: o.replace });
+      if (!l._mask) l._mask = new Uint8Array(W * H).fill(255);
+      for (let y = 0; y < img.height; y++) {
+        for (let x = 0; x < img.width; x++) l._mask[(tb.top + y) * W + tb.left + x] = data[y * img.width + x];
+      }
+    },
   };
 
   function snapshot() {
     return {
       order: doc.layers.slice(),
+      masks: new Map(doc.layers.map((l) => [l, l._mask ? l._mask.slice() : null])),
       stores: new Map(doc.layers.map((l) => [l, l._store.slice()])),
       visible: new Map(doc.layers.map((l) => [l, l._visible])),
       active: doc._active.slice(),
@@ -330,6 +376,7 @@ function createFakePhotoshop(opts = {}) {
     doc.layers.length = 0;
     for (const l of s.order) {
       l._store = s.stores.get(l).slice();
+      l._mask = s.masks.get(l) ? s.masks.get(l).slice() : null;
       l._visible = s.visible.get(l);
       doc.layers.push(l);
     }

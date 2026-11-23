@@ -66,8 +66,12 @@ function createProcessor(opts) {
   const inv0 = phys.inv[0];
   const inv1 = phys.inv[1];
   const inv2 = phys.inv[2];
-  const identity = phys.A === 0;
+  const identity = phys.A === 0 && opts.view !== 'halo';
   const ex = phys.excess;
+  const WT = phys.wTab;            // threshold weights over linear luminance, or null
+  const WN = S.WEIGHT_N;
+  const SL = T.SRGB_LUT;
+  const haloView = opts.view === 'halo';
 
   const b = opts.baseLevel != null ? opts.baseLevel | 0 : autoBaseLevel(w, h);
   const scale = 1 << b;
@@ -90,6 +94,19 @@ function createProcessor(opts) {
     XB[x] = ib * 3;
     XF[x] = f;
   }
+  // Linear value -> 8-bit code with dither, by binary search (used by the halo-only view).
+  function encodeLinear(v, noise) {
+    if (v >= 1) return 255;
+    if (v <= 0) return 0;
+    let lo = 0;
+    let hi = 255;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (lut[mid] <= v) lo = mid;
+      else hi = mid;
+    }
+    return (v - lut[lo]) * R[lo] + noise >= 1 ? lo + 1 : lo;
+  }
   const ALPHA = new Float32Array(256);
   for (let i = 0; i < 256; i++) ALPHA[i] = i / 255;
 
@@ -104,7 +121,22 @@ function createProcessor(opts) {
       const y = y0 + ry;
       const brow = (y >> b) * bstride;
       let p = ry * w * comps;
-      if (comps === 4) {
+      if (WT) {
+        // threshold on: the source is weighted by display luminance (and alpha)
+        for (let x = 0; x < w; x++) {
+          const r = data[p];
+          const g = data[p + 1];
+          const bl = data[p + 2];
+          const Y = 0.2126 * SL[r] + 0.7152 * SL[g] + 0.0722 * SL[bl];
+          let k = WT[(Y * WN + 0.5) | 0];
+          if (comps === 4) k *= ALPHA[data[p + 3]];
+          const bi = brow + (x >> b) * 3;
+          base[bi] += lut[r] * k;
+          base[bi + 1] += lut[g] * k;
+          base[bi + 2] += lut[bl] * k;
+          p += comps;
+        }
+      } else if (comps === 4) {
         for (let x = 0; x < w; x++) {
           const al = ALPHA[data[p + 3]];
           const bi = brow + (x >> b) * 3;
@@ -209,12 +241,22 @@ function createProcessor(opts) {
         let t;
         let c;
         let hv;
+        let wl = 1;
+        if (WT) {
+          const Y = 0.2126 * SL[data[p]] + 0.7152 * SL[data[p + 1]] + 0.0722 * SL[data[p + 2]];
+          wl = WT[(Y * WN + 0.5) | 0];
+        }
 
         // R
         code = data[p];
         L = lut[code];
         hv = rowBuf[xa] + fx * (rowBuf[xb] - rowBuf[xa]);
-        if (ex) { d = hv - L; O = d > 0 ? L + a0 * d : L; } else O = (L + a0 * hv) * inv0;
+        d = hv - wl * L;
+        if (haloView) {
+          O = ex ? (d > 0 ? a0 * d : 0) : a0 * hv * inv0;
+          out[p] = encodeLinear(O, NOISE[nr0 + ((gx + NDX[0]) & 63)]);
+        } else {
+        if (ex) O = d > 0 ? L + a0 * d : L; else O = L + a0 * d * inv0;
         d = O - L;
         t = TOL[code];
         if (d < t && d > -t) {
@@ -224,11 +266,17 @@ function createProcessor(opts) {
           if (d > 0) { while (c < 255 && O >= lut[c + 1]) c++; } else { while (c > 0 && O < lut[c]) c--; }
           out[p] = c >= 255 ? 255 : ((O - lut[c]) * R[c] + NOISE[nr0 + ((gx + NDX[0]) & 63)] >= 1 ? c + 1 : c);
         }
+        }
         // G
         code = data[p + 1];
         L = lut[code];
         hv = rowBuf[xa + 1] + fx * (rowBuf[xb + 1] - rowBuf[xa + 1]);
-        if (ex) { d = hv - L; O = d > 0 ? L + a1 * d : L; } else O = (L + a1 * hv) * inv1;
+        d = hv - wl * L;
+        if (haloView) {
+          O = ex ? (d > 0 ? a1 * d : 0) : a1 * hv * inv1;
+          out[p + 1] = encodeLinear(O, NOISE[nr1 + ((gx + NDX[1]) & 63)]);
+        } else {
+        if (ex) O = d > 0 ? L + a1 * d : L; else O = L + a1 * d * inv1;
         d = O - L;
         t = TOL[code];
         if (d < t && d > -t) {
@@ -238,11 +286,17 @@ function createProcessor(opts) {
           if (d > 0) { while (c < 255 && O >= lut[c + 1]) c++; } else { while (c > 0 && O < lut[c]) c--; }
           out[p + 1] = c >= 255 ? 255 : ((O - lut[c]) * R[c] + NOISE[nr1 + ((gx + NDX[1]) & 63)] >= 1 ? c + 1 : c);
         }
+        }
         // B
         code = data[p + 2];
         L = lut[code];
         hv = rowBuf[xa + 2] + fx * (rowBuf[xb + 2] - rowBuf[xa + 2]);
-        if (ex) { d = hv - L; O = d > 0 ? L + a2 * d : L; } else O = (L + a2 * hv) * inv2;
+        d = hv - wl * L;
+        if (haloView) {
+          O = ex ? (d > 0 ? a2 * d : 0) : a2 * hv * inv2;
+          out[p + 2] = encodeLinear(O, NOISE[nr2 + ((gx + NDX[2]) & 63)]);
+        } else {
+        if (ex) O = d > 0 ? L + a2 * d : L; else O = L + a2 * d * inv2;
         d = O - L;
         t = TOL[code];
         if (d < t && d > -t) {
@@ -251,6 +305,7 @@ function createProcessor(opts) {
           c = code;
           if (d > 0) { while (c < 255 && O >= lut[c + 1]) c++; } else { while (c > 0 && O < lut[c]) c--; }
           out[p + 2] = c >= 255 ? 255 : ((O - lut[c]) * R[c] + NOISE[nr2 + ((gx + NDX[2]) & 63)] >= 1 ? c + 1 : c);
+        }
         }
         p += comps;
       }
@@ -291,6 +346,7 @@ function processImage(data, width, height, components, settings, opts) {
     docLongSide: o.docLongSide || Math.max(width, height),
     settings,
     baseLevel: o.baseLevel,
+    view: o.view,
   });
   const rows = Math.max(1, o.stripRows || proc.stripRows);
   const rowBytes = width * components;

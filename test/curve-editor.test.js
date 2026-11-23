@@ -73,6 +73,7 @@ function setup(extra = {}) {
     canvas,
     core,
     devicePixelRatio: 1,
+    requestFrame: (cb) => cb(), // deterministic: draw at once
     height: 170,
     xField,
     yField,
@@ -197,4 +198,35 @@ test("curve editor: core reason codes are shown in Russian", () => {
   assert.match(CurveEditor.reasonText("not-increasing"), /возрастать/);
   assert.match(CurveEditor.reasonText("x-too-close"), /1 код/);
   assert.equal(CurveEditor.reasonText("Своя причина"), "Своя причина");
+});
+
+test("curve editor (v1.1 flicker fix): same-size resize does not clear the canvas; renders coalesce per frame", () => {
+  const { canvas, calls } = fakeCanvas();
+  let widthSets = 0;
+  let w = 0;
+  Object.defineProperty(canvas, "width", {
+    get: () => w,
+    set: (v) => { widthSets++; w = v; },
+  });
+  const frames = [];
+  const ed = new CurveEditor({ canvas, core, devicePixelRatio: 1, height: 170, requestFrame: (cb) => frames.push(cb) });
+  assert.equal(widthSets, 1, "sized once on creation");
+  assert.equal(ed.resize(), false, "same size: nothing to do");
+  assert.equal(ed.resize(300.6, 170.2), false, "same integer size");
+  assert.equal(widthSets, 1, "canvas.width not reassigned (that would clear it)");
+  assert.equal(ed.resize(320), true);
+  assert.equal(widthSets, 2);
+
+  const clears = () => calls.filter((c) => c[0] === "fillRect" && c[1] === 0 && c[2] === 0).length;
+  const before = clears();
+  frames.length = 0;
+  ed.render();
+  ed.render();
+  ed.setYAxis("log"); // also renders
+  assert.equal(frames.length, 1, "one frame requested for three render calls");
+  assert.equal(clears(), before, "nothing drawn before the frame");
+  frames[0]();
+  assert.equal(clears(), before + 1, "drawn once");
+  ed.render();
+  assert.equal(frames.length, 2, "a new frame after the previous one ran");
 });

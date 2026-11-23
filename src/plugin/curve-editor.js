@@ -61,6 +61,11 @@
   var DOUBLE_CLICK_MS = 400;
   var DOUBLE_CLICK_PX = 6;
 
+  function defaultRequestFrame(cb) {
+    if (typeof requestAnimationFrame === "function") return requestAnimationFrame(cb);
+    return setTimeout(cb, 16);
+  }
+
   function nowMs() {
     return typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
   }
@@ -137,6 +142,10 @@
     this._lastPointerEventAt = -Infinity;
     this._logMin = -4;
     this._loggedCaptureFallback = false;
+    // One render per frame (v1.1 flicker fix). Tests pass requestFrame: cb => cb().
+    this._requestFrame = opts.requestFrame || defaultRequestFrame;
+    this._frameQueued = false;
+    this._labelKey = null;
 
     var init = this.core.validateCurve(opts.points || this.core.defaultCurvePoints());
     this.points = init.ok ? copyPoints(init.points) : copyPoints(this.core.validateCurve(this.core.defaultCurvePoints()).points);
@@ -252,19 +261,25 @@
   };
 
   /** Resize to the given CSS size; defaults to the parent's width and the configured height. */
+  /** Resize to the given CSS size (default: the parent's width and the configured height).
+   *  Assigning canvas.width clears the canvas, so it happens only when the integer size
+   *  really changed (v1.1 flicker fix). Returns true when the canvas was resized. */
   P.resize = function (cssWidth, cssHeight) {
     var parent = this.canvas.parentNode;
     var w = cssWidth || (parent && parent.clientWidth) || this.cssWidth || 260;
     var h = cssHeight || this.fixedHeight;
     w = Math.max(120, Math.floor(w));
     h = Math.max(80, Math.floor(h));
+    var pw = Math.round(w * this.dpr), ph = Math.round(h * this.dpr);
+    if (w === this.cssWidth && h === this.cssHeight && this.canvas.width === pw && this.canvas.height === ph) return false;
     this.cssWidth = w;
     this.cssHeight = h;
-    this.canvas.width = Math.round(w * this.dpr);
-    this.canvas.height = Math.round(h * this.dpr);
+    this.canvas.width = pw;
+    this.canvas.height = ph;
     this.canvas.style.width = w + "px";
     this.canvas.style.height = h + "px";
-    this.render();
+    this.renderNow(); // the canvas was just cleared: draw at once
+    return true;
   };
 
   P.destroy = function () {
@@ -378,7 +393,18 @@
 
   // ---------- drawing ----------
 
+  /** Schedule a redraw; several calls within one frame draw once. */
   P.render = function () {
+    if (this._frameQueued) return;
+    this._frameQueued = true;
+    var self = this;
+    this._requestFrame(function () {
+      self._frameQueued = false;
+      self.renderNow();
+    });
+  };
+
+  P.renderNow = function () {
     var ctx = this.ctx, c = this.colors, d = this.dpr;
     if (!ctx) return;
     var W = this.canvas.width, H = this.canvas.height;
@@ -503,6 +529,11 @@
 
   P._renderLabels = function (pl, yTicks) {
     var d = this.dpr, i, span;
+    // Rebuild the HTML labels only when they change: rebuilding on every frame changed
+    // the layout and fed the flicker (v1.1).
+    var labelKey = this.yAxis + "|" + this._logMin + "|" + this.cssWidth + "|" + this.cssHeight;
+    if (labelKey === this._labelKey) return;
+    this._labelKey = labelKey;
     if (this.yLabels) {
       this.yLabels.innerHTML = "";
       this.yLabels.style.height = this.cssHeight + "px";

@@ -90,3 +90,23 @@ const out = core.processImage(data, width, height, components, settings,
 This runs the same processor in one go.
 
 `core.VERSION`: string.
+
+## v1.1 additions
+
+### Settings
+- `blurMul`: blur multiplier 0.01..4, default 1. Canonical since v1.1. A legacy `blur` slider value (0..100) is still accepted when `blurMul` is absent and is converted as `2^((blur-50)/25)`. `normalizeSettings` returns `blurMul` and no `blur`.
+- `strength`: percent 0..400, default 30. a_R = (p/100)² up to 100 %, then p/100 (400 % → a = 4).
+- `threshold`: 0..255, default 0 (off). Display-luminance code from which a pixel starts to emit halo light.
+- `softness`: 0..255, default 32. Width of the smooth transition, centred on the threshold.
+  - Per pixel, `w = smoothstep(threshold − softness/2, threshold + softness/2, Y')`, where Y' is the sRGB-encoded Rec.709 luminance of the pixel, in codes. It does not depend on the mode or curve.
+  - The halo source is `w·L·α`. The model compares the received halo with the pixel's own weighted light (`H − w·L`), so flat fields stay unchanged at any threshold.
+
+### Helpers
+- `core.blurFromSlider(u)` / `core.blurToSlider(m)`: log mapping between a slider u ∈ 0..100 and m ∈ 0.01..4 (×1 sits at u ≈ 76.9).
+- `core.blurMultiplier(settingsOrNumber)`: with a settings object, returns its normalized `blurMul`; with a number, applies the legacy 0..100 mapping.
+- `core.strengthToA(percent)`.
+- `core.loupeMargin(settings, docLongSide)`: integer pixels to read around a loupe region so the halo tail is complete. Capped at 1024.
+- `core.processImage(..., { view: 'halo' })` and `createProcessor({ ..., view: 'halo' })`: output only the halo, encoded through the curve, as the preview's "Только ореол" does. The default view is `'after'`.
+- `core.LOOKS`: an array of `{ id, name, description, settings }`, the built-in starting looks (names in Russian).
+- `core.layerNameFor(settings)`: the result layer name, `"Halation · <short Russian summary> [h1:<token>]"`. It is at most 255 characters, and the token carries the full settings, curve points included.
+- `core.settingsFromLayerName(name)`: settings, or null if the name carries no valid token. `core.isResultLayerName(name)`: true for names produced by `layerNameFor` and for the plain v1.0 name "Halation".

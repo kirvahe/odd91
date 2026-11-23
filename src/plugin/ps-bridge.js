@@ -458,15 +458,82 @@
       return null;
     }
 
-    /** Every existing result layer of this document made in this session. */
+    /** Result layer by name: "Halation · … [h1:…]" (v1.1) or the plain v1.0 "Halation". */
+    function isResultName(name) {
+      if (typeof name !== "string") return false;
+      if (typeof core.isResultLayerName === "function") return !!core.isResultLayerName(name);
+      return name === RESULT_LAYER_NAME;
+    }
+
+    function layerName(l) {
+      return safe(function () { return l.name; }) || "";
+    }
+
+    function isResultLayer(doc, l) {
+      return !!l && (resultSource.has(key(doc.id, l.id)) || isResultName(layerName(l)));
+    }
+
+    function allLayers(container, out) {
+      out = out || [];
+      var layers = toArray(safe(function () { return container.layers; }));
+      for (var i = 0; i < layers.length; i++) {
+        out.push(layers[i]);
+        allLayers(layers[i], out);
+      }
+      return out;
+    }
+
+    /** Every existing result layer of this document: our ID lists plus result-named layers
+     *  (results from an earlier session or made before the panel was reloaded). */
     function resultLayersOf(doc) {
       var out = [];
+      var seen = {};
       resultSource.forEach(function (r) {
         if (r.docId !== doc.id) return;
         var l = findLayerById(doc, r.id);
-        if (l) out.push(l);
+        if (l && !seen[l.id]) {
+          seen[l.id] = true;
+          out.push(l);
+        }
+      });
+      allLayers(doc).forEach(function (l) {
+        if (!seen[l.id] && isResultName(layerName(l))) {
+          seen[l.id] = true;
+          out.push(l);
+        }
       });
       return out;
+    }
+
+    /** Result layers stacked directly above `source` in its list (a result keeps that place). */
+    function resultsDirectlyAbove(doc, source) {
+      var list = containerList(doc, source.id);
+      if (!list) return [];
+      var out = [];
+      var i = 0;
+      while (i < list.length && list[i].id !== source.id) i++;
+      for (var j = i - 1; j >= 0 && isResultLayer(doc, list[j]); j--) out.push(list[j].id);
+      return out;
+    }
+
+    /** First non-result layer below a result-named layer: its likely source. */
+    function sourceBelow(doc, layer) {
+      var list = containerList(doc, layer.id);
+      if (!list) return null;
+      var i = 0;
+      while (i < list.length && list[i].id !== layer.id) i++;
+      for (var j = i + 1; j < list.length; j++) if (!isResultLayer(doc, list[j])) return list[j];
+      return null;
+    }
+
+    function resultIdsOfSource(doc, sourceKey, source) {
+      var ids = liveResultIds(doc, sourceKey);
+      if (source) {
+        resultsDirectlyAbove(doc, source).forEach(function (id) {
+          if (ids.indexOf(id) < 0) ids.push(id);
+        });
+      }
+      return ids;
     }
 
     // Composite reads must not see earlier Halation results (review С4): hide the visible
@@ -591,10 +658,58 @@
 
     // ---- pre-flight (doc §6.3); reads only, no modal scope
 
+    /** Name of the layer and the settings its name carries (core.settingsFromLayerName). */
+    function activeLayerInfoOf(layer) {
+      if (!layer) return null;
+      var name = layerName(layer);
+      var parsed = null;
+      if (typeof core.settingsFromLayerName === "function") {
+        parsed = safe(function () { return core.settingsFromLayerName(name); }) || null;
+      }
+      return { id: layer.id, name: name, isResult: isResultName(name), settingsFromName: parsed };
+    }
+
+    /** Synchronous DOM read for the panel (no modal scope): the active layer's name info. */
+    function activeLayerInfo() {
+      var doc = safe(function () { return app.activeDocument; });
+      if (!doc) return null;
+      var layer = toArray(safe(function () { return doc.activeLayers; }))[0] || null;
+      return activeLayerInfoOf(layer);
+    }
+
+    /** Bounds of the active selection, or null. DOM first (Document.selection), then batchPlay. */
+    /** Read-only, no modal scope: active layer info and the selection, for the panel. */
+    async function peek() {
+      var doc = safe(function () { return app.activeDocument; });
+      if (!doc) return { activeLayer: null, selection: null };
+      var layer = toArray(safe(function () { return doc.activeLayers; }))[0] || null;
+      return { activeLayer: activeLayerInfoOf(layer), selection: await readSelectionBounds(doc) };
+    }
+
+    async function readSelectionBounds(doc) {
+      var sel = safe(function () { return doc.selection; });
+      if (sel && typeof sel === "object" && "bounds" in sel) {
+        var b = safe(function () { return sel.bounds; });
+        var nb = b ? normBounds(b) : null;
+        return nb && !isEmptyRect(nb) ? nb : null;
+      }
+      try {
+        var r = await batchGet([{ _obj: "get", _target: [{ _property: "selection" }, { _ref: "document", _id: doc.id }] }]);
+        var s = r && r[0] && r[0].selection;
+        if (!s || typeof s !== "object") return null;
+        var bb = normBounds({ left: s.left, top: s.top, right: s.right, bottom: s.bottom });
+        return bb && !isEmptyRect(bb) ? bb : null;
+      } catch (e) {
+        return null; // no selection: Photoshop answers "get selection" with an error
+      }
+    }
+
     async function inspect(opts) {
       opts = opts || {};
       var t0 = now();
       var rep = {
+        activeLayer: null,
+        selection: null,
         blocking: [],
         warnings: [],
         notes: [],
@@ -644,6 +759,8 @@
       var active = toArray(safe(function () { return doc.activeLayers; }));
       var activeLayer = active[0] || null;
       var compKey = key(d.id, "composite");
+      rep.activeLayer = activeLayerInfoOf(activeLayer);
+      rep.selection = await readSelectionBounds(doc);
 
       rep.plans.composite = {
         mode: "composite",
@@ -683,6 +800,16 @@
               (safe(function () { return src.name; }) || "") + "».");
           } else {
             rep.warnings.push("Исходный слой этого результата не найден — будет обработан сам слой результата.");
+          }
+        } else if (isResultName(layerName(activeLayer))) {
+          // A result layer we did not make in this session (earlier session, reopened file):
+          // results sit directly above their source, so take the first layer below.
+          var below = sourceBelow(doc, activeLayer);
+          if (below) {
+            sourceLayer = below;
+            rep.notes.push("Активен слой результата Halation — эффект будет применён к слою под ним «" + layerName(below) + "».");
+          } else {
+            rep.warnings.push("Активен слой результата Halation, а под ним нет исходного слоя — будет обработан сам этот слой.");
           }
         }
       }
@@ -730,7 +857,7 @@
         area: area,
         docLongSide: docLongSide,
         sourceKey: srcKey,
-        previousResultIds: opts.replacePrevious ? liveResultIds(doc, srcKey) : [],
+        previousResultIds: opts.replacePrevious ? resultIdsOfSource(doc, srcKey, sourceLayer) : [],
         reselectId: sourceLayer.id,
         layerBounds: li.bounds, // tight pixel bounds: its first and last rows hold pixels
         label: "слой «" + li.name + "»"
@@ -924,13 +1051,14 @@
       return ep && ep.PLACEBEFORE !== undefined ? ep.PLACEBEFORE : "placeBefore";
     }
 
-    async function createResultLayer(doc, plan) {
+    async function createResultLayer(doc, plan, name) {
       var layer;
+      name = name || RESULT_LAYER_NAME;
       if (typeof doc.createPixelLayer === "function") {
-        layer = await doc.createPixelLayer({ name: RESULT_LAYER_NAME });
+        layer = await doc.createPixelLayer({ name: name });
       } else if (typeof doc.createLayer === "function") {
         log("createPixelLayer недоступен — используется createLayer");
-        layer = await doc.createLayer({ name: RESULT_LAYER_NAME });
+        layer = await doc.createLayer({ name: name });
       } else {
         throw new Error("В этой версии Photoshop нет createPixelLayer");
       }
@@ -939,9 +1067,10 @@
       if (plan.mode === "layer") {
         // Above the topmost existing result of this source, so an earlier opaque result
         // never hides the new one (review С3); otherwise right above the source.
-        var prev = topmostLayer(doc, liveResultIds(doc, plan.sourceKey).filter(function (id) { return id !== layer.id; }));
-        target = prev || findLayerById(doc, plan.sourceLayerId);
-        if (!target) throw new Error("Исходный слой не найден");
+        var srcLayer = findLayerById(doc, plan.sourceLayerId);
+        if (!srcLayer) throw new Error("Исходный слой не найден");
+        var prev = topmostLayer(doc, resultIdsOfSource(doc, plan.sourceKey, srcLayer).filter(function (id) { return id !== layer.id; }));
+        target = prev || srcLayer;
         placedAbove = prev ? "result" : "source";
       } else {
         target = toArray(safe(function () { return doc.layers; }))[0];
@@ -994,6 +1123,157 @@
     function procStats(proc) {
       if (!proc) return null;
       return safe(function () { return proc.stats; }) || null;
+    }
+
+    // ---- v1.1 helpers: layer name, selection mask, reads that hide earlier results
+
+    /** Result layer name with the settings token (core.layerNameFor), at most 255 characters. */
+    function resultLayerName(settings) {
+      if (typeof core.layerNameFor !== "function") return RESULT_LAYER_NAME;
+      var n = safe(function () { return core.layerNameFor(settings); });
+      return typeof n === "string" && n ? n.slice(0, 255) : RESULT_LAYER_NAME;
+    }
+
+    /**
+     * The selection becomes the result layer's mask (best-practices §3.4). The mask is
+     * written for the whole work area in one call: black outside the selection, so it
+     * never depends on what a new mask holds by default.
+     */
+    async function writeSelectionMask(docId, layerId, area, stats, pool) {
+      if (typeof imaging.getSelection !== "function" || typeof imaging.putLayerMask !== "function") {
+        throw new Error("В этой версии Photoshop нет getSelection / putLayerMask — снимите галочку «Только в выделении»");
+      }
+      var W = rectW(area), H = rectH(area);
+      var info = { selectionBounds: null, components: null, maskBytes: W * H };
+      var sel = null, selData = null, maskImg = null;
+      try {
+        sel = await imaging.getSelection({ documentID: docId, sourceBounds: area });
+        selData = sel && sel.imageData;
+        var mask = new Uint8Array(W * H); // 0: hidden
+        if (selData) {
+          var sb = sel.sourceBounds ? normBounds(sel.sourceBounds) : { left: area.left, top: area.top, right: area.right, bottom: area.bottom };
+          var iw = num(selData.width), ih = num(selData.height);
+          if (iw > 0 && ih > 0) sb = { left: sb.left, top: sb.top, right: sb.left + iw, bottom: sb.top + ih };
+          var raw = await selData.getData({ chunky: true });
+          var comps = num(selData.components) || 1;
+          stats.bytesRead += raw.length;
+          if (raw.length !== rectW(sb) * rectH(sb) * comps) {
+            throw new Error("getSelection вернул " + raw.length + " байт вместо " + rectW(sb) + "×" + rectH(sb) + "×" + comps);
+          }
+          info.selectionBounds = sb;
+          info.components = comps;
+          var r = intersect(sb, area);
+          if (r) {
+            var sbW = rectW(sb);
+            for (var y = r.top; y < r.bottom; y++) {
+              var d = (y - area.top) * W + (r.left - area.left);
+              var s = ((y - sb.top) * sbW + (r.left - sb.left)) * comps;
+              if (comps === 1) {
+                mask.set(raw.subarray(s, s + rectW(r)), d);
+              } else {
+                for (var x = 0; x < rectW(r); x++) mask[d + x] = raw[s + x * comps];
+              }
+            }
+          }
+        } else {
+          log("getSelection не вернул данных — маска будет пустой");
+        }
+        maskImg = await imaging.createImageDataFromBuffer(mask, {
+          width: W,
+          height: H,
+          components: 1,
+          chunky: true,
+          colorSpace: "Grayscale",
+          colorProfile: "Gray Gamma 2.2"
+        });
+        await imaging.putLayerMask({
+          documentID: docId,
+          layerID: layerId,
+          imageData: maskImg,
+          replace: true, // one call covers the whole area
+          targetBounds: { left: area.left, top: area.top },
+          commandName: COMMAND_NAME
+        });
+        log("Маска из выделения записана", info);
+        return info;
+      } finally {
+        if (selData && typeof selData.dispose === "function") selData.dispose();
+        if (maskImg && typeof maskImg.dispose === "function") maskImg.dispose();
+      }
+    }
+
+    // Composite reads: hide earlier results inside a suspended history that is then
+    // discarded (resumeHistory(id, false)), so nothing lands in the History panel.
+    async function hideForRead(ctx, doc, plan, historyName) {
+      var st = { hidden: [], suspension: null, hc: ctx && ctx.hostControl };
+      if (plan.mode !== "composite") return st;
+      var visible = resultLayersOf(doc).filter(function (l) {
+        return safe(function () { return l.visible; }) !== false;
+      });
+      if (!visible.length) return st;
+      if (st.hc && typeof st.hc.suspendHistory === "function") {
+        st.suspension = await st.hc.suspendHistory({ documentID: doc.id, name: historyName });
+      }
+      st.hidden = hideResultLayers(doc);
+      return st;
+    }
+
+    async function unhideAfterRead(doc, st) {
+      restoreVisibility(doc, st.hidden);
+      if (st.suspension !== null && st.suspension !== undefined) await st.hc.resumeHistory(st.suspension, false);
+    }
+
+    /**
+     * Loupe (v1.1): read one rectangle of the preview's source at full resolution.
+     * Returns { data, components, width, height, left, top, hadData, stats }, with the
+     * rectangle clamped to the plan's work area. Missing (trimmed) pixels are alpha 0.
+     */
+    async function readRegion(args) {
+      args = args || {};
+      var plan = args.plan;
+      if (!plan) throw new Error("Нет источника для лупы");
+      var rect = args.rect ? intersect(normBounds(args.rect), plan.area) : null;
+      if (!rect) throw nothingToDoError("Место лупы вне обрабатываемой области — щёлкните по кадру в другом месте.");
+      var stats = newStats("loupe", plan);
+      stats.area = rect;
+      var pool = new ScratchPool();
+      var t0 = now();
+      var region = null;
+      var outcome = { cancelled: false, nothing: false };
+      try {
+        await runModal(async function (ctx) {
+          try {
+            var doc = activeDocChecked(plan.docId);
+            var st = await hideForRead(ctx, doc, plan, "Halation: лупа");
+            stats.hiddenDuringRead = st.hidden;
+            var reader = makeReader(doc.id, plan, rect, stats, ctx, pool);
+            var s = await reader.read(0, rectH(rect), { pass: 1, tolerate: plan.mode === "layer" });
+            region = {
+              data: s.data.slice(), // own copy: the pool buffer is reused
+              components: s.components,
+              width: rectW(rect),
+              height: rectH(rect),
+              left: rect.left,
+              top: rect.top,
+              hadData: s.hadData
+            };
+            await unhideAfterRead(doc, st);
+          } finally {
+            if (ctx && ctx.isCancelled) outcome.cancelled = true;
+          }
+        }, "Halation: лупа");
+      } catch (err) {
+        var e = classifyError(err, outcome);
+        stats.timings.total = now() - t0;
+        stats.cancelled = isCancelError(e);
+        stats.error = errorText(e);
+        attach(e, "halationStats", stats);
+        throw e;
+      }
+      stats.ok = true;
+      stats.timings.total = now() - t0;
+      region.stats = stats;
+      return region;
     }
 
     // ---- apply (doc §6.2, §5.5-5.6)
@@ -1101,8 +1381,9 @@
 
             // New layer above the source or its topmost earlier result (top for the composite).
             t = now();
-            var made = await createResultLayer(doc, plan);
+            var made = await createResultLayer(doc, plan, resultLayerName(settings));
             resultId = made.layer.id;
+            stats.layerName = layerName(made.layer);
             stats.placedAbove = made.placedAbove;
             stats.layerMoved = made.moved;
             stats.timings.layer = now() - t;
@@ -1122,6 +1403,14 @@
               await checkpoint(ctx);
             }
             stats.timings.write = now() - t;
+
+            // Only inside the selection: the selection becomes the result's layer mask,
+            // in the same history step (v1.1).
+            if (args.maskToSelection) {
+              t = now();
+              stats.mask = await writeSelectionMask(doc.id, resultId, area, stats, pool);
+              stats.timings.mask = now() - t;
+            }
 
             // Visibility back before committing, then the source becomes active again.
             restoreVisibility(doc, hidden);
@@ -1173,21 +1462,8 @@
             // Composite: hide earlier results for the read (review С4). Inside a suspended
             // history that is discarded at the end, so nothing lands in the History panel;
             // on an exception Photoshop rolls the visibility back as well.
-            var hidden = [];
-            var suspension = null;
-            var hc = ctx && ctx.hostControl;
-            if (plan.mode === "composite") {
-              var visibleResults = resultLayersOf(doc).filter(function (l) {
-                return safe(function () { return l.visible; }) !== false;
-              });
-              if (visibleResults.length) {
-                if (hc && typeof hc.suspendHistory === "function") {
-                  suspension = await hc.suspendHistory({ documentID: doc.id, name: "Halation: предпросмотр" });
-                }
-                hidden = hideResultLayers(doc);
-              }
-            }
-            stats.hiddenDuringRead = hidden;
+            var hideState = await hideForRead(ctx, doc, plan, "Halation: предпросмотр");
+            stats.hiddenDuringRead = hideState.hidden;
 
             var area = plan.area;
             var W = rectW(area), H = rectH(area);
@@ -1214,8 +1490,7 @@
             if (!any && reader.firstError) throw reader.firstError;
             stats.timings.read = now() - t;
 
-            restoreVisibility(doc, hidden);
-            if (suspension !== null && suspension !== undefined) await hc.resumeHistory(suspension, false);
+            await unhideAfterRead(doc, hideState);
 
             t = now();
             proxy = b.finish();
@@ -1306,6 +1581,9 @@
     return {
       getHostInfo: getHostInfo,
       inspect: inspect,
+      activeLayerInfo: activeLayerInfo,
+      peek: peek,
+      readRegion: readRegion,
       apply: apply,
       buildPreview: buildPreview,
       encodePreviewJpeg: encodePreviewJpeg,

@@ -218,11 +218,16 @@ body {
 
 /* preview */
 .preview-wrap {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  min-height: 120px;
+  /* Fixed height (v1.1): swapping the preview or loupe image never changes the layout,
+     which fed the curve editor's flicker. Keep PREVIEW_BOX_H in panel.js in sync. */
+  height: 280px;
+  min-height: 280px;
+  max-height: 280px;
   background-color: var(--hal-panel);
   border: 1px solid var(--hal-border);
   border-radius: 3px;
@@ -304,4 +309,35 @@ body {
   color: var(--hal-text);
   background-color: var(--hal-panel);
   border: 1px solid var(--hal-border);
+}
+
+/* v1.1 */
+.section-title {
+  display: block;
+  margin-bottom: 2px;
+}
+
+.field-num {
+  width: 64px;
+  min-width: 64px;
+  margin-left: 6px;
+  margin-right: 0;
+}
+
+.field-name {
+  width: 150px;
+}
+
+.preset-picker {
+  width: 190px;
+}
+
+.loupe-frame {
+  position: absolute;
+  border: 1px solid #ffffff;
+  outline: 1px solid #000000;
+}
+
+.preview-img {
+  cursor: crosshair;
 }

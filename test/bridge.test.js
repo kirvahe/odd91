@@ -173,7 +173,10 @@ for (const emptyMode of ["null", "throw", "zero"]) {
       docLongSide: 80,
     });
     const result = fake.findLayer(res.resultLayerId);
-    assert.equal(result.name, "Halation");
+    assert.equal(result.name, core.layerNameFor(SETTINGS), "the name carries the settings");
+    const back = core.settingsFromLayerName(result.name);
+    assert.ok(Math.abs(back.blurMul - SETTINGS.blurMul) < 1e-3, "blurMul survives the name token");
+    assert.deepEqual([back.strength, back.mode, back.color], [SETTINGS.strength, SETTINGS.mode, SETTINGS.color]);
     assertAreaEquals(result._store, 80, 60, area, expected, 4, "result layer");
     assert.ok(src._store.every((v, i) => v === srcBefore[i]), "source layer untouched");
 
@@ -354,7 +357,7 @@ test("re-apply from the result layer: source is used, previous result replaced i
 
   const ids = fake.doc.layers.map((l) => l.id);
   assert.ok(!ids.includes(first.resultLayerId), "previous result deleted");
-  assert.equal(ids.filter((id) => fake.findLayer(id).name === "Halation").length, 1);
+  assert.equal(ids.filter((id) => core.isResultLayerName(fake.findLayer(id).name)).length, 1);
   assert.equal(ids.indexOf(second.resultLayerId), ids.indexOf(2) - 1);
   assert.deepEqual(fake.doc._active, [2]);
   assert.deepEqual(second.stats.deletedPreviousIds, [first.resultLayerId]);
@@ -404,7 +407,7 @@ test("after Undo the restored result is tracked again and IDs of undone layers a
 
   const r3 = await bridge.apply({ settings: SETTINGS, plan: viaResult.plans.layer });
   assert.deepEqual(r3.stats.deletedPreviousIds, [r1.resultLayerId]);
-  const halation = fake.doc.layers.filter((l) => l.name === "Halation").map((l) => l.id);
+  const halation = fake.doc.layers.filter((l) => core.isResultLayerName(l.name)).map((l) => l.id);
   assert.deepEqual(halation, [r3.resultLayerId]);
   const ids = fake.doc.layers.map((l) => l.id);
   assert.equal(ids.indexOf(r3.resultLayerId), ids.indexOf(2) - 1);
@@ -705,4 +708,159 @@ test("placeStrip: 3-component trimmed data is expanded to RGBA with alpha 0 arou
     0, 0, 0, 0, 10, 20, 30, 255, 40, 50, 60, 255, 0, 0, 0, 0,
   ]);
   assert.equal(Bridge.placeStrip(raw, 3, { left: 0, top: 0, right: 2, bottom: 1 }, { left: 5, top: 10, right: 9, bottom: 12 }), null);
+});
+
+// ---------------------------------------------------------------- v1.1: mask, names, loupe
+
+test("selection -> layer mask: written for the whole area in the same step, then disposed", async () => {
+  const sel = { left: 20, top: 10, right: 40, bottom: 30 };
+  const fake = offsetLayerFake("null", { selection: sel });
+  const { bridge } = makeBridge(fake, { stripRows: 8 });
+  const rep = await bridge.inspect({});
+  assert.deepEqual(rep.selection, sel);
+  const plan = rep.plans.layer;
+  const a = plan.area;
+  const res = await bridge.apply({ settings: SETTINGS, plan, maskToSelection: true });
+  assert.deepEqual(fake.log.getSelection, [{ documentID: 1, sourceBounds: a }]);
+  assert.equal(fake.log.putLayerMask.length, 1);
+  assert.deepEqual(fake.log.putLayerMask[0], { layerID: res.resultLayerId, targetBounds: { left: a.left, top: a.top }, width: a.right - a.left, height: a.bottom - a.top, replace: true });
+  const mask = fake.findLayer(res.resultLayerId)._mask;
+  for (let y = a.top; y < a.bottom; y++) {
+    for (let x = a.left; x < a.right; x++) {
+      const inside = x >= sel.left && x < sel.right && y >= sel.top && y < sel.bottom;
+      assert.equal(mask[y * 80 + x], inside ? 255 : 0, `mask at ${x},${y}`);
+    }
+  }
+  assert.ok(res.stats.mask && res.stats.mask.selectionBounds);
+  assert.equal(fake.log.history.length, 1, "one history step");
+  allDisposed(fake);
+
+  // without the option nothing touches the selection
+  const fake2 = offsetLayerFake("null", { selection: sel });
+  const b2 = makeBridge(fake2).bridge;
+  await b2.apply({ settings: SETTINGS, plan: (await b2.inspect({})).plans.layer });
+  assert.equal(fake2.log.getSelection.length, 0);
+  assert.equal(fake2.log.putLayerMask.length, 0);
+});
+
+test("selection outside the work area gives an all-black mask; no selection reads as null", async () => {
+  const fake = offsetLayerFake("null", { selection: { left: 70, top: 50, right: 80, bottom: 60 } });
+  const { bridge } = makeBridge(fake);
+  const plan = (await bridge.inspect({})).plans.layer;
+  const res = await bridge.apply({ settings: SETTINGS, plan, maskToSelection: true });
+  const mask = fake.findLayer(res.resultLayerId)._mask;
+  const a = plan.area;
+  for (let y = a.top; y < a.bottom; y++) for (let x = a.left; x < a.right; x++) assert.equal(mask[y * 80 + x], 0);
+  const none = await makeBridge(offsetLayerFake("null")).bridge.inspect({});
+  assert.equal(none.selection, null);
+});
+
+test("result layers are recognised by name, also from an earlier session", async () => {
+  const earlier = core.normalizeSettings({ strength: 150, blurMul: 0.5, threshold: 120 });
+  const name = core.layerNameFor(earlier);
+  const fake = offsetLayerFake("null");
+  // an earlier result directly above the source, made before the panel was reloaded
+  const old = fake.makeLayer({ id: 50, name, pixels: { left: 0, top: 0, w: 80, h: 60, data: new Uint8Array(80 * 60 * 4).fill(200) } });
+  fake.doc.layers.unshift(old);
+  fake.doc._active = [50];
+  const { bridge } = makeBridge(fake, { stripRows: 8 });
+
+  const rep = await bridge.inspect({ replacePrevious: true });
+  assert.equal(rep.activeLayer.isResult, true);
+  assert.equal(rep.activeLayer.settingsFromName.strength, 150);
+  assert.equal(rep.activeLayer.settingsFromName.threshold, 120);
+  assert.equal(rep.plans.layer.sourceLayerId, 2, "the layer below is the source");
+  assert.ok(rep.notes.some((n) => /под ним «Огни»/.test(n)));
+  assert.deepEqual(rep.plans.layer.previousResultIds, [50]);
+  const res = await bridge.apply({ settings: SETTINGS, plan: rep.plans.layer });
+  assert.ok(!fake.findLayer(50), "earlier result replaced");
+  const ids = fake.doc.layers.map((l) => l.id);
+  assert.equal(ids.indexOf(res.resultLayerId), ids.indexOf(2) - 1);
+
+  // the plain v1.0 name counts too; without "replace" the new result goes above it
+  const fake2 = offsetLayerFake("null");
+  fake2.doc.layers.unshift(fake2.makeLayer({ id: 60, name: "Halation", pixels: { left: 0, top: 0, w: 80, h: 60, data: new Uint8Array(80 * 60 * 4).fill(90) } }));
+  fake2.doc._active = [2];
+  const b2 = makeBridge(fake2).bridge;
+  const r2 = await b2.apply({ settings: SETTINGS, plan: (await b2.inspect({ replacePrevious: false })).plans.layer });
+  assert.deepEqual(fake2.doc.layers.map((l) => l.id).slice(0, 3), [r2.resultLayerId, 60, 2]);
+});
+
+test("composite reads hide result-named layers from an earlier session as well", async () => {
+  const fake = createFakePhotoshop({
+    width: 30,
+    height: 20,
+    compositeOpaque: true,
+    layers: [
+      { id: 70, name: "Halation", pixels: { left: 0, top: 0, w: 30, h: 20, data: new Uint8Array(30 * 20 * 4).fill(255) } },
+      { id: 1, name: "Фон", opaque: true, pixels: { left: 0, top: 0, w: 30, h: 20, data: makePixels(30, 20).map((v, i) => (i % 4 === 3 ? 255 : v)) } },
+    ],
+    activeId: 1,
+  });
+  const { bridge } = makeBridge(fake, { stripRows: 6 });
+  const rep = await bridge.inspect({});
+  await bridge.apply({ settings: SETTINGS, plan: rep.plans.composite });
+  assert.ok(fake.log.getPixels.every((g) => !g.visibleLayers.includes(70)));
+  assert.equal(fake.findLayer(70).visible, true);
+});
+
+test("loupe: readRegion clamps to the work area, keeps trimmed pixels transparent, hides results", async () => {
+  const fake = offsetLayerFake("null");
+  const { bridge } = makeBridge(fake);
+  const plan = (await bridge.inspect({})).plans.layer;
+  const a = plan.area;
+  const want = { left: a.left - 10, top: a.top + 3, right: a.left + 20, bottom: a.top + 17 };
+  const r = await bridge.readRegion({ plan, rect: want });
+  assert.deepEqual([r.left, r.top, r.width, r.height], [a.left, a.top + 3, 20, 14]);
+  assert.equal(r.components, 4);
+  const store = fake.findLayer(2)._store;
+  for (let y = 0; y < r.height; y++) {
+    for (let x = 0; x < r.width; x++) {
+      for (let c = 0; c < 4; c++) {
+        const s = ((r.top + y) * 80 + r.left + x) * 4 + c;
+        const got = r.data[(y * r.width + x) * 4 + c];
+        const alpha = store[((r.top + y) * 80 + r.left + x) * 4 + 3];
+        assert.equal(got, alpha === 0 ? 0 : store[s], `pixel ${x},${y},${c}`);
+      }
+    }
+  }
+  assert.equal(fake.log.modal.at(-1).commandName, "Halation: лупа");
+  assert.equal(fake.log.created.length, 0);
+  allDisposed(fake);
+  // the same pixels run through the core give what the full apply gives there
+  const out = core.processImage(r.data, r.width, r.height, 4, SETTINGS, { originX: r.left, originY: r.top, docLongSide: 80, view: "halo" });
+  assert.equal(out.length, r.data.length);
+  await assert.rejects(bridge.readRegion({ plan, rect: { left: 0, top: 0, right: 3, bottom: 3 } }), (err) => Bridge.describeError(err).kind === "nothing");
+
+  // composite: earlier results hidden during the read, nothing committed to history
+  const comp = createFakePhotoshop({
+    width: 30,
+    height: 20,
+    compositeOpaque: true,
+    layers: [
+      { id: 70, name: "Halation", pixels: { left: 0, top: 0, w: 30, h: 20, data: new Uint8Array(30 * 20 * 4).fill(255) } },
+      { id: 1, name: "Фон", opaque: true, pixels: { left: 0, top: 0, w: 30, h: 20, data: makePixels(30, 20).map((v, i) => (i % 4 === 3 ? 255 : v)) } },
+    ],
+    activeId: 1,
+  });
+  const cb = makeBridge(comp).bridge;
+  const cplan = (await cb.inspect({})).plans.composite;
+  const cr = await cb.readRegion({ plan: cplan, rect: { left: 5, top: 5, right: 15, bottom: 12 } });
+  assert.equal(cr.components, 3);
+  assert.ok(comp.log.getPixels.every((g) => !g.visibleLayers.includes(70)));
+  assert.equal(comp.findLayer(70).visible, true);
+  assert.equal(comp.log.resume.at(-1).commit, false);
+  assert.equal(comp.log.history.length, 0);
+  assert.deepEqual(cr.stats.hiddenDuringRead, [70]);
+});
+
+test("peek: active layer settings and selection without a modal scope", async () => {
+  const s = core.normalizeSettings({ strength: 222 });
+  const fake = offsetLayerFake("null", { selection: { left: 1, top: 2, right: 3, bottom: 4 } });
+  fake.doc.layers.unshift(fake.makeLayer({ id: 80, name: core.layerNameFor(s) }));
+  fake.doc._active = [80];
+  const p = await makeBridge(fake).bridge.peek();
+  assert.equal(p.activeLayer.settingsFromName.strength, 222);
+  assert.deepEqual(p.selection, { left: 1, top: 2, right: 3, bottom: 4 });
+  assert.equal(fake.log.modal.length, 0);
 });

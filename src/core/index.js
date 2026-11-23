@@ -5,9 +5,10 @@ const T = require('./transfer');
 const S = require('./settings');
 const P = require('./processor');
 const V = require('./preview');
+const PR = require('./presets');
 
 module.exports = {
-  VERSION: '1.0.0',
+  VERSION: '1.1.0',
   DEFAULTS: S.DEFAULTS,
   normalizeSettings: S.normalizeSettings,
   defaultCurvePoints: T.defaultCurvePoints,
@@ -15,11 +16,22 @@ module.exports = {
   curveSamples: T.curveSamples,
   buildLutIn: S.buildLutIn,
   blurMultiplier: S.blurMultiplier,
+  blurFromSlider: S.blurFromSlider,
+  blurToSlider: S.blurToSlider,
+  strengthToA: S.strengthToA,
   colorGains: S.colorGains,
+  loupeMargin: S.loupeMargin,
   createPreviewBuilder: V.createPreviewBuilder,
   renderPreview: V.renderPreview,
   createProcessor: P.createProcessor,
   processImage: P.processImage,
+  LOOKS: PR.LOOKS,
+  settingsToToken: PR.settingsToToken,
+  settingsFromToken: PR.settingsFromToken,
+  describeSettings: PR.describeSettings,
+  layerNameFor: PR.layerNameFor,
+  settingsFromLayerName: PR.settingsFromLayerName,
+  isResultLayerName: PR.isResultLayerName,
   // internals exposed for tests and the demo page
   _internal: {
     transfer: T,
