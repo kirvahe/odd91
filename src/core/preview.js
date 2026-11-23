@@ -265,9 +265,15 @@ function previewFields(proxy, settings, opts) {
   // colour, the 255 part by the weight of white. The loupe shows the exact per-pixel result.
   const m = proxy.mean;
   const wRest = new Float32Array(n);
-  const w255 = S.lumaWeight(phys, 1);
+  const w255 = phys.wTab ? phys.wTab[255] : 1; // a pixel with a 255 channel has max = 255
+  const wsrc = phys.wTab ? new Float32Array(n * 3) : null;
   for (let i = 0; i < n; i++) {
-    wRest[i] = S.lumaWeight(phys, S.LUMA[0] * m[i * 3] + S.LUMA[1] * m[i * 3 + 1] + S.LUMA[2] * m[i * 3 + 2]);
+    wRest[i] = S.linearWeight(phys, Math.max(m[i * 3], m[i * 3 + 1], m[i * 3 + 2]));
+    if (wsrc) {
+      const fmax = Math.max(f[i * 3], f[i * 3 + 1], f[i * 3 + 2]);
+      const v = ((1 - fmax) * wRest[i] + fmax * w255) * (alpha ? alpha[i] : 1);
+      wsrc[i * 3] = wsrc[i * 3 + 1] = wsrc[i * 3 + 2] = v;
+    }
   }
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
@@ -295,8 +301,17 @@ function previewFields(proxy, settings, opts) {
     }
   }
   const docLongSide = o.docLongSide > 0 ? o.docLongSide : Math.max(proxy.srcWidth, proxy.srcHeight);
-  const field = phys.A === 0 ? src : H.runToEnd(H.haloForChannels(src, w, h, S.kernelGaussians(s, docLongSide, 1 / proxy.block)));
-  return { phys, lut, aux, L, Lrest: lin.Lrest, field, wRest, w255 };
+  const gaussians = S.kernelGaussians(s, docLongSide, 1 / proxy.block);
+  const field = phys.A === 0 ? src : H.runToEnd(H.haloForChannels(src, w, h, gaussians));
+  // Blurred source-weight map (threshold only): the pixel's own share is compared with its
+  // neighbours' weights, as in the full processor.
+  let hwMap = null;
+  if (wsrc && phys.A !== 0) {
+    const wk = H.runToEnd(H.haloForChannels(wsrc, w, h, [gaussians[0], gaussians[0], gaussians[0]]));
+    hwMap = new Float32Array(n);
+    for (let i = 0; i < n; i++) hwMap[i] = wk[i * 3];
+  }
+  return { phys, lut, aux, L, Lrest: lin.Lrest, field, wRest, w255, hwMap };
 }
 
 function renderPreview(fullProxy, settings, view, opts) {
@@ -316,7 +331,7 @@ function renderPreview(fullProxy, settings, view, opts) {
     // processed separately, turned into display light through the curve, and mixed in display
     // light. Mixing in curve light would let a thin white line (1/12 of a block) brighten the
     // whole block to white under a curve with a jump.
-    const { phys, lut, aux, Lrest, field, wRest, w255 } = previewFields(proxy, settings, opts);
+    const { phys, lut, aux, Lrest, field, hwMap } = previewFields(proxy, settings, opts);
     const f = proxy.f255;
     const ex = phys.excess;
     const halo = view === 'halo';
@@ -331,16 +346,16 @@ function renderPreview(fullProxy, settings, view, opts) {
           const inv = phys.inv[c];
           const hv = field[j];
           const lr = Lrest[j];
-          let e = hv - wRest[i] * lr;
-          let o;
-          if (halo) o = ex ? (e > 0 ? a * e : 0) : a * hv * inv;
-          else o = ex ? (e > 0 ? lr + a * e : lr) : lr + a * e * inv;
+          const hw = hwMap ? hwMap[i] : 1;
+          let e = hv - hw * lr;
+          let o = ex ? (e > 0 ? (a <= 1 ? lr + a * e : lr + e * (1 + ((a - 1) * e) / hv)) : lr) : lr + a * e * inv;
+          if (halo) o = ex ? o - lr : a * hv * inv;
           let disp = srgb ? (o >= 1 ? 1 : o <= 0 ? 0 : o) : displayLight(lut, R, o);
           const fj = f[j];
           if (fj > 0) {
-            e = hv - w255; // the 255 part has linear light 1 for every curve
-            if (halo) o = ex ? (e > 0 ? a * e : 0) : a * hv * inv;
-            else o = ex ? (e > 0 ? 1 + a * e : 1) : 1 + a * e * inv;
+            e = hv - hw; // the 255 part has linear light 1 for every curve
+            o = ex ? (e > 0 ? (a <= 1 ? 1 + a * e : 1 + e * (1 + ((a - 1) * e) / hv)) : 1) : 1 + a * e * inv;
+            if (halo) o = ex ? o - 1 : a * hv * inv;
             const d255 = srgb ? (o >= 1 ? 1 : o <= 0 ? 0 : o) : displayLight(lut, R, o);
             disp = fj * d255 + (1 - fj) * disp;
           }

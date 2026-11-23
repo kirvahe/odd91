@@ -84,7 +84,11 @@ function settingsFromToken(token) {
     else if (k === 'L') out.reinhardLimit = Number(v);
     else if (k === 't') out.threshold = Number(v);
     else if (k === 'f') out.softness = Number(v);
-    else if (k === 'k') out.curvePoints = v.split('|').map((pt) => pt.split(',').map(Number));
+    else if (k === 'k') {
+      const pts = v.split('|').map((pt) => pt.split(',').map(Number));
+      if (!S.normalizeSettings({}).curvePoints || !require('./transfer').validateCurve(pts).ok) return null;
+      out.curvePoints = pts;
+    }
     else if (k === 'r') out.radii = v.split(',').map(Number);
   }
   if (!out.mode) return null;
@@ -122,8 +126,12 @@ function settingsFromLayerName(name) {
   return m ? settingsFromToken(m[1]) : null;
 }
 
+// Only names this plugin produces: exactly "Halation" (v1.0) or "Halation[ · summary] [h1:token]"
+// with a token that parses. A user layer such as "Halation glow" is never treated as a result.
 function isResultLayerName(name) {
-  return typeof name === 'string' && /^Halation(\s|$|\s*\[)/.test(name);
+  if (typeof name !== 'string') return false;
+  if (name === 'Halation') return true;
+  return /^Halation( · .*)? \[h1:[^\]]*\]$/.test(name) && settingsFromLayerName(name) !== null;
 }
 
 module.exports = { LOOKS, settingsToToken, settingsFromToken, describeSettings, layerNameFor, settingsFromLayerName, isResultLayerName };

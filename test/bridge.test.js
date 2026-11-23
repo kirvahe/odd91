@@ -743,16 +743,47 @@ test("selection -> layer mask: written for the whole area in the same step, then
   assert.equal(fake2.log.putLayerMask.length, 0);
 });
 
-test("selection outside the work area gives an all-black mask; no selection reads as null", async () => {
+test("selection that misses the work area: no mask and a warning, never an invisible result", async () => {
   const fake = offsetLayerFake("null", { selection: { left: 70, top: 50, right: 80, bottom: 60 } });
   const { bridge } = makeBridge(fake);
   const plan = (await bridge.inspect({})).plans.layer;
   const res = await bridge.apply({ settings: SETTINGS, plan, maskToSelection: true });
-  const mask = fake.findLayer(res.resultLayerId)._mask;
-  const a = plan.area;
-  for (let y = a.top; y < a.bottom; y++) for (let x = a.left; x < a.right; x++) assert.equal(mask[y * 80 + x], 0);
+  assert.equal(fake.log.putLayerMask.length, 0, "no mask");
+  assert.match(res.stats.maskWarning, /не пересекает/);
+  assert.equal(fake.findLayer(res.resultLayerId)._mask, undefined);
+  // the selection was read before any pixel work
+  const firstGetPixels = fake.log.getPixels.length;
+  assert.ok(firstGetPixels > 0);
   const none = await makeBridge(offsetLayerFake("null")).bridge.inspect({});
   assert.equal(none.selection, null);
+});
+
+test("selection read first: a missing getSelection fails before any pixel is read", async () => {
+  const fake = offsetLayerFake("null", { selection: { left: 20, top: 10, right: 40, bottom: 30 } });
+  delete fake.photoshop.imaging.getSelection;
+  const { bridge } = makeBridge(fake);
+  const plan = (await bridge.inspect({})).plans.layer;
+  await assert.rejects(bridge.apply({ settings: SETTINGS, plan, maskToSelection: true }), /getSelection/);
+  assert.equal(fake.log.getPixels.length, 0, "no pixel read before the failure");
+  assert.equal(fake.log.created.length, 0);
+});
+
+test("selection answered with data the size of the request: the mask is not shifted", async () => {
+  const sel = { left: 20, top: 10, right: 40, bottom: 30 };
+  const fake = offsetLayerFake("null", { selection: sel, selectionAnswer: "request" });
+  const { bridge } = makeBridge(fake);
+  const plan = (await bridge.inspect({})).plans.layer;
+  const a = plan.area;
+  const res = await bridge.apply({ settings: SETTINGS, plan, maskToSelection: true });
+  assert.equal(res.stats.mask.answer, "размер запроса");
+  const mask = fake.findLayer(res.resultLayerId)._mask;
+  for (let y = a.top; y < a.bottom; y++) {
+    for (let x = a.left; x < a.right; x++) {
+      const inside = x >= sel.left && x < sel.right && y >= sel.top && y < sel.bottom;
+      assert.equal(mask[y * 80 + x], inside ? 255 : 0, `mask at ${x},${y}`);
+    }
+  }
+  allDisposed(fake);
 });
 
 test("result layers are recognised by name, also from an earlier session", async () => {
@@ -863,4 +894,108 @@ test("peek: active layer settings and selection without a modal scope", async ()
   assert.equal(p.activeLayer.settingsFromName.strength, 222);
   assert.deepEqual(p.selection, { left: 1, top: 2, right: 3, bottom: 4 });
   assert.equal(fake.log.modal.length, 0);
+});
+
+// ---------------------------------------------------------------- v1.1 review: names, fine radius
+
+test("a user layer named «Halation …» is never treated as a result (review v1.1 С3)", async () => {
+  for (const userName of ["Halation mask paint", "Halation copy", "Halation 2", "Halation — ретушь"]) {
+    assert.equal(core.isResultLayerName(userName), false, userName);
+    const fake = offsetLayerFake("null");
+    fake.doc.layers.unshift(fake.makeLayer({ id: 90, name: userName, pixels: { left: 0, top: 0, w: 80, h: 60, data: new Uint8Array(80 * 60 * 4).fill(120) } }));
+    fake.doc._active = [2];
+    const { bridge } = makeBridge(fake, { stripRows: 8 });
+    const rep = await bridge.inspect({ replacePrevious: true });
+    assert.deepEqual(rep.plans.layer.previousResultIds, [], "not a previous result: " + userName);
+    await bridge.apply({ settings: SETTINGS, plan: rep.plans.layer });
+    assert.ok(fake.findLayer(90), "user layer kept: " + userName);
+    // composite: the user layer stays visible in every read
+    fake.log.getPixels.length = 0;
+    const comp = (await bridge.inspect({ replacePrevious: false })).plans.composite;
+    await bridge.apply({ settings: SETTINGS, plan: comp });
+    assert.ok(fake.log.getPixels.every((g) => g.visibleLayers.includes(90)), "user layer read: " + userName);
+    // active user layer named «Halation …» is processed itself, not the layer below
+    fake.doc._active = [90];
+    const own = await bridge.inspect({ replacePrevious: true });
+    assert.equal(own.plans.layer.sourceLayerId, 90, "processed itself: " + userName);
+    assert.ok(!own.notes.some((n) => /под ним/.test(n)));
+  }
+  assert.equal(core.isResultLayerName("Halation"), true);
+  assert.equal(core.isResultLayerName(core.layerNameFor(SETTINGS)), true);
+});
+
+// A spy that reports a fine radius: pass 2 must read the strip with that many extra rows
+// above and below (clamped to the work area) and hand them to pass2 as dataY0 / dataRows.
+function fineRadiusCore(radius, calls) {
+  return Object.assign({}, core, {
+    createProcessor(opts) {
+      const p = core.createProcessor(opts);
+      return {
+        get stripRows() { return p.stripRows; },
+        get stats() { return p.stats; },
+        get fineRadius() { return radius; },
+        pass1: (...a) => p.pass1(...a),
+        blurSteps: () => p.blurSteps(),
+        pass2(data, comps, y0, rows, out, o) {
+          calls.push({ y0, rows, dataY0: o && o.dataY0, dataRows: o && o.dataRows, len: data.length, comps });
+          return p.pass2(data, comps, y0, rows, out, o);
+        },
+      };
+    },
+  });
+}
+
+test("pass 2 reads overlapping strips for core.fineRadius and passes dataY0 / dataRows", async () => {
+  const fake = offsetLayerFake("null");
+  const calls = [];
+  const { bridge } = makeBridge(fake, { core: fineRadiusCore(3, calls), stripRows: 4 });
+  const plan = (await bridge.inspect({})).plans.layer;
+  const a = plan.area, H = a.bottom - a.top, n = Math.ceil(H / 4);
+  const res = await bridge.apply({ settings: SETTINGS, plan });
+  assert.equal(res.stats.fineRadius, 3);
+  const pass2Reads = fake.log.getPixels.slice(n);
+  assert.equal(pass2Reads.length, n);
+  pass2Reads.forEach((g, i) => {
+    const y0 = i * 4, end = Math.min(H, y0 + 4);
+    assert.equal(g.sourceBounds.top, a.top + Math.max(0, y0 - 3), "top with context, strip " + i);
+    assert.equal(g.sourceBounds.bottom, a.top + Math.min(H, end + 3), "bottom with context, strip " + i);
+    const c = calls[i];
+    assert.equal(c.y0, y0);
+    assert.equal(c.dataY0, Math.max(0, y0 - 3));
+    assert.equal(c.dataRows, Math.min(H, end + 3) - Math.max(0, y0 - 3));
+    assert.equal(c.len, c.dataRows * (a.right - a.left) * c.comps);
+  });
+  // writes stay on each strip's own rows: nothing outside the area, nothing twice
+  for (const p of fake.log.putPixels) {
+    const k = Math.floor((p.targetBounds.top - a.top) / 4);
+    assert.ok(p.targetBounds.top + p.height <= a.top + Math.min(H, k * 4 + 4), "write inside its strip");
+  }
+  // the result equals the one-shot core result (the transparent band stays empty)
+  const expected = core.processImage(areaOf(fake.findLayer(2)._store, 80, a), a.right - a.left, H, 4, SETTINGS, {
+    originX: a.left, originY: a.top, docLongSide: 80,
+  });
+  assertAreaEquals(fake.findLayer(res.resultLayerId)._store, 80, 60, a, expected, 4, "fine radius result");
+  allDisposed(fake);
+});
+
+test("with the real core: a level-1 apply (fine gaussians in pass 2) matches processImage", async () => {
+  const W = 1200, H = 900; // above the full-resolution limit: base level 1
+  const level = typeof core.baseLevelFor === "function" ? core.baseLevelFor(W, H) : 0;
+  const data = new Uint8Array(W * H * 4);
+  for (let i = 0; i < W * H; i++) {
+    const x = i % W, y = Math.floor(i / W);
+    const v = (x % 53 > 45 && y % 47 > 40) || (x * 7 + y * 3) % 401 === 0 ? 255 : 50 + ((x + y) % 9);
+    data.set([v, v - 10 > 0 ? v - 10 : 0, v - 30 > 0 ? v - 30 : 0, 255], i * 4);
+  }
+  const fake = createFakePhotoshop({ width: W, height: H, layers: [{ id: 1, name: "Фон", opaque: true, pixels: { left: 0, top: 0, w: W, h: H, data } }] });
+  const s = core.normalizeSettings({ blurMul: 0.02, strength: 100, mode: "reinhard" });
+  const { bridge } = makeBridge(fake, { stripRows: 37 });
+  const res = await bridge.apply({ settings: s, plan: (await bridge.inspect({})).plans.layer });
+  const rgb = new Uint8Array(W * H * 3);
+  for (let i = 0; i < W * H; i++) rgb.set(data.subarray(i * 4, i * 4 + 3), i * 3);
+  const expected = core.processImage(rgb, W, H, 3, s, { originX: 0, originY: 0, docLongSide: W });
+  assertAreaEquals(fake.findLayer(res.resultLayerId)._store, W, H, { left: 0, top: 0, right: W, bottom: H }, expected, 3, "level " + level);
+  if (level >= 1 && res.stats.fineRadius > 0) {
+    assert.ok(fake.log.getPixels.slice(Math.ceil(H / 37)).some((g) => g.sourceBounds.bottom - g.sourceBounds.top > 37), "overlapping reads used");
+  }
 });

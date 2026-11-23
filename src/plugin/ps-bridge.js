@@ -996,6 +996,7 @@
           }
           placed.hadData = true;
           placed.sourceBounds = ib;
+          placed.width = W;
           return placed;
         } finally {
           if (imageData && typeof imageData.dispose === "function") imageData.dispose();
@@ -1135,25 +1136,40 @@
     }
 
     /**
-     * The selection becomes the result layer's mask (best-practices §3.4). The mask is
-     * written for the whole work area in one call: black outside the selection, so it
-     * never depends on what a new mask holds by default.
+     * The selection becomes the result layer's mask (best-practices §3.4), in two steps
+     * (review v1.1 М2): readSelectionMask runs first, right after suspendHistory, so a
+     * missing method or a lost selection fails before any pixel work; putSelectionMask
+     * writes the mask at the end. The mask covers the whole work area in one call (black
+     * outside the selection), so it never depends on what a new mask holds by default.
+     * Returns { mask: Uint8Array | null, info }; mask is null (with info.warning) when the
+     * selection does not reach the work area: then no mask is added and the panel warns.
      */
-    async function writeSelectionMask(docId, layerId, area, stats, pool) {
+    async function readSelectionMask(docId, area, stats) {
       if (typeof imaging.getSelection !== "function" || typeof imaging.putLayerMask !== "function") {
         throw new Error("В этой версии Photoshop нет getSelection / putLayerMask — снимите галочку «Только в выделении»");
       }
       var W = rectW(area), H = rectH(area);
-      var info = { selectionBounds: null, components: null, maskBytes: W * H };
-      var sel = null, selData = null, maskImg = null;
+      var info = { selectionBounds: null, components: null, maskBytes: W * H, answer: null, warning: null };
+      var sel = null, selData = null;
+      var mask = new Uint8Array(W * H); // 0: hidden
+      var any = false;
       try {
         sel = await imaging.getSelection({ documentID: docId, sourceBounds: area });
         selData = sel && sel.imageData;
-        var mask = new Uint8Array(W * H); // 0: hidden
         if (selData) {
-          var sb = sel.sourceBounds ? normBounds(sel.sourceBounds) : { left: area.left, top: area.top, right: area.right, bottom: area.bottom };
           var iw = num(selData.width), ih = num(selData.height);
-          if (iw > 0 && ih > 0) sb = { left: sb.left, top: sb.top, right: sb.left + iw, bottom: sb.top + ih };
+          var sb;
+          if (iw === W && ih === H) {
+            // Data the size of the request covers the request, whatever bounds come back
+            // (Adobe does not document which of the two the answer carries).
+            sb = { left: area.left, top: area.top, right: area.right, bottom: area.bottom };
+            info.answer = "размер запроса";
+          } else {
+            var rb = sel.sourceBounds ? normBounds(sel.sourceBounds) : null;
+            if (!rb || !(iw > 0 && ih > 0)) throw new Error("getSelection вернул данные без понятных границ");
+            sb = { left: rb.left, top: rb.top, right: rb.left + iw, bottom: rb.top + ih };
+            info.answer = "границы выделения";
+          }
           var raw = await selData.getData({ chunky: true });
           var comps = num(selData.components) || 1;
           stats.bytesRead += raw.length;
@@ -1168,19 +1184,32 @@
             for (var y = r.top; y < r.bottom; y++) {
               var d = (y - area.top) * W + (r.left - area.left);
               var s = ((y - sb.top) * sbW + (r.left - sb.left)) * comps;
-              if (comps === 1) {
-                mask.set(raw.subarray(s, s + rectW(r)), d);
-              } else {
-                for (var x = 0; x < rectW(r); x++) mask[d + x] = raw[s + x * comps];
+              for (var x = 0; x < rectW(r); x++) {
+                var v = raw[s + x * comps];
+                mask[d + x] = v;
+                if (v) any = true;
               }
             }
           }
-        } else {
-          log("getSelection не вернул данных — маска будет пустой");
         }
+      } finally {
+        if (selData && typeof selData.dispose === "function") selData.dispose();
+      }
+      if (!any) {
+        info.warning = "Выделение не пересекает обрабатываемую область — маска не добавлена, эффект применён ко всей области.";
+        log("Маска из выделения: " + info.warning, info);
+        return { mask: null, info: info };
+      }
+      log("Выделение прочитано для маски", info);
+      return { mask: mask, info: info };
+    }
+
+    async function putSelectionMask(docId, layerId, area, mask) {
+      var maskImg = null;
+      try {
         maskImg = await imaging.createImageDataFromBuffer(mask, {
-          width: W,
-          height: H,
+          width: rectW(area),
+          height: rectH(area),
           components: 1,
           chunky: true,
           colorSpace: "Grayscale",
@@ -1194,10 +1223,8 @@
           targetBounds: { left: area.left, top: area.top },
           commandName: COMMAND_NAME
         });
-        log("Маска из выделения записана", info);
-        return info;
+        log("Маска из выделения записана");
       } finally {
-        if (selData && typeof selData.dispose === "function") selData.dispose();
         if (maskImg && typeof maskImg.dispose === "function") maskImg.dispose();
       }
     }
@@ -1255,7 +1282,9 @@
               height: rectH(rect),
               left: rect.left,
               top: rect.top,
-              hadData: s.hadData
+              hadData: s.hadData,
+              // A read error counted as "transparent" must not pass silently (review v1.1 М1).
+              warning: s.tolerated ? "Photoshop не отдал пиксели этой области: она прозрачна или слой изменился — нажмите «Обновить»." : null
             };
             await unhideAfterRead(doc, st);
           } finally {
@@ -1284,6 +1313,29 @@
       if (outcome.nothing && !(err && err.halationNothingToDo)) return flagError(err, "halationNothingToDo");
       if (outcome.cancelled && !isCancelError(err)) return flagError(err, "halationCancelled", "Операция отменена пользователем");
       return err;
+    }
+
+    /** Does the read hold any pixel (alpha > 0) in its rows [sy, sy + h)? */
+    function stripHasPixels(s, sy, h) {
+      if (!s.hadData || !s.rect) return false;
+      var r = s.rect;
+      var r0 = Math.max(r.y, sy), r1 = Math.min(r.y + r.h, sy + h);
+      if (r1 <= r0) return false;
+      if (s.components !== 4) return true;
+      for (var y = r0; y < r1; y++) {
+        for (var x = r.x; x < r.x + r.w; x++) {
+          if (s.data[(y * s.width + x) * 4 + 3]) return true;
+        }
+      }
+      return false;
+    }
+
+    /** The part of a read that falls on the strip's own rows, in strip coordinates. */
+    function stripPart(s, sy, h, W) {
+      var r = s.rect;
+      var r0 = Math.max(r.y, sy), r1 = Math.min(r.y + r.h, sy + h);
+      var rect = { x: r.x, y: r0 - sy, w: r.w, h: r1 - r0 };
+      return { components: s.components, rect: rect, full: rect.x === 0 && rect.w === W && rect.y === 0 && rect.h === h };
     }
 
     function stripMismatch(req, hadBefore) {
@@ -1315,6 +1367,16 @@
             }
             var report = progressReporter(ctx, args.onProgress);
             stats.layerOrder = { before: topLevelIds(doc), after: null };
+
+            // The selection is read first (review v1.1 М2): a missing method or a lost
+            // selection fails before any pixel work; an empty one means no mask + warning.
+            var maskBuf = null;
+            if (args.maskToSelection) {
+              var sm = await readSelectionMask(doc.id, plan.area, stats);
+              stats.mask = sm.info;
+              maskBuf = sm.mask;
+              if (!maskBuf) stats.maskWarning = sm.info.warning;
+            }
 
             // Previous results go away in the same history step, before reading.
             var deleted = [];
@@ -1358,7 +1420,7 @@
               y0 = i * rows;
               h = Math.min(rows, H - y0);
               var s1 = await reader.read(y0, h, { pass: 1, tolerate: mayBeEmpty(i) });
-              had[i] = s1.hadData;
+              had[i] = stripHasPixels(s1, 0, h);
               if (s1.tolerated) stats.toleratedStrips++;
               proc.pass1(s1.data, s1.components, y0, h);
               report(WEIGHTS.read * (i + 1) / nStrips, "чтение");
@@ -1388,17 +1450,32 @@
             stats.layerMoved = made.moved;
             stats.timings.layer = now() - t;
 
-            // Pass 2: re-read the same strips and write the output. Each strip must look
-            // the same as in pass 1 (has pixels or not), otherwise the blur used other data.
+            // Pass 2: re-read the strips and write the output. Each strip must look the same
+            // as in pass 1 (has pixels or not), otherwise the blur used other data.
+            // Gaussians finer than the base grid run at full resolution here and need
+            // proc.fineRadius rows of context above and below each strip (core v1.1).
+            var fr = Math.max(0, Math.floor(num(safe(function () { return proc.fineRadius; })) || 0));
+            stats.fineRadius = fr;
             t = now();
             for (i = 0; i < nStrips; i++) {
               y0 = i * rows;
               h = Math.min(rows, H - y0);
-              var s2 = await reader.read(y0, h, { pass: 2, tolerate: !had[i] && mayBeEmpty(i) });
-              if (s2.hadData !== had[i]) throw stripMismatch(area.top + y0, had[i]);
+              var dY0 = Math.max(0, y0 - fr);
+              var dEnd = Math.min(H, y0 + h + fr);
+              var dRows = dEnd - dY0;
+              // A read error may count as empty only if every strip it touches was empty.
+              var tol = true;
+              for (var j = Math.floor(dY0 / rows); j <= Math.floor((dEnd - 1) / rows); j++) {
+                if (had[j] || !mayBeEmpty(j)) tol = false;
+              }
+              var s2 = await reader.read(dY0, dRows, { pass: 2, tolerate: tol });
+              var sy = y0 - dY0; // the strip's rows inside the read
+              var stripHas = stripHasPixels(s2, sy, h);
+              if (stripHas !== had[i]) throw stripMismatch(area.top + y0, had[i]);
               var out = pool.get("out", h * W * s2.components);
-              proc.pass2(s2.data, s2.components, y0, h, out);
-              if (s2.hadData) await writeStrip(doc.id, resultId, out, W, s2, area, y0, reader.meta, stats, pool);
+              if (fr > 0) proc.pass2(s2.data, s2.components, y0, h, out, { dataY0: dY0, dataRows: dRows });
+              else proc.pass2(s2.data, s2.components, y0, h, out);
+              if (stripHas) await writeStrip(doc.id, resultId, out, W, stripPart(s2, sy, h, W), area, y0, reader.meta, stats, pool);
               report(WEIGHTS.read + WEIGHTS.blur + WEIGHTS.write * (i + 1) / nStrips, "запись");
               await checkpoint(ctx);
             }
@@ -1406,9 +1483,10 @@
 
             // Only inside the selection: the selection becomes the result's layer mask,
             // in the same history step (v1.1).
-            if (args.maskToSelection) {
+            if (maskBuf) {
               t = now();
-              stats.mask = await writeSelectionMask(doc.id, resultId, area, stats, pool);
+              await putSelectionMask(doc.id, resultId, area, maskBuf);
+              stats.mask.written = true;
               stats.timings.mask = now() - t;
             }
 

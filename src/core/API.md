@@ -11,13 +11,17 @@ All images are chunky 8-bit: `Uint8Array`, row-major, `components` = 3 (RGB) or 
 
 ```js
 {
-  mode: "srgb" | "curve",
-  curvePoints: [[x, y], ...], // interior points only; x = code 0..255, y = linear light 0..1
-                              // endpoints (0,0) and (255,1) are implicit; at most 12 points
-  color: [r, g, b],           // glow color, sRGB 0..255; default [255, 144, 39]
-  blur: 50,                   // slider 0..100; multiplier m = 2^((blur-50)/25), 50 => x1
-  strength: 30,               // slider 0..100; A = 0.25 * strength/100
-  radii: [1, 1, 1]            // per-channel radius factors (advanced / demo only)
+  model: "excess" | "normalized",  // halo model, default "excess"
+  mode: "srgb" | "curve" | "reinhard",
+  reinhardLimit: 1.1,              // 1.01..4, mode "reinhard" only
+  curvePoints: [[x, y], ...],      // interior points only; x = code 0..255, y = linear light 0..1
+                                   // endpoints (0,0) and (255,1) are implicit; at most 12 points
+  color: [r, g, b],                // glow color, sRGB 0..255; default [255, 144, 39]
+  blurMul: 1,                      // 0.01..4 (legacy `blur` 0..100 accepted and converted)
+  strength: 30,                    // percent 0..400
+  threshold: 0,                    // 0..255 on the brightest channel; 0 = off
+  softness: 32,                    // 0..255, width of the smooth transition
+  radii: [1, 1, 1]                 // per-channel radius factors (advanced / demo only)
 }
 ```
 
@@ -96,17 +100,21 @@ This runs the same processor in one go.
 ### Settings
 - `blurMul`: blur multiplier 0.01..4, default 1. Canonical since v1.1. A legacy `blur` slider value (0..100) is still accepted when `blurMul` is absent and is converted as `2^((blur-50)/25)`. `normalizeSettings` returns `blurMul` and no `blur`.
 - `strength`: percent 0..400, default 30. a_R = (p/100)² up to 100 %, then p/100 (400 % → a = 4).
-- `threshold`: 0..255, default 0 (off). Display-luminance code from which a pixel starts to emit halo light.
-- `softness`: 0..255, default 32. Width of the smooth transition, centred on the threshold.
-  - Per pixel, `w = smoothstep(threshold − softness/2, threshold + softness/2, Y')`, where Y' is the sRGB-encoded Rec.709 luminance of the pixel, in codes. It does not depend on the mode or curve.
-  - The halo source is `w·L·α`. The model compares the received halo with the pixel's own weighted light (`H − w·L`), so flat fields stay unchanged at any threshold.
+- `threshold`: 0..255, default 0 (off). The code of the pixel's **brightest channel** from which it emits halo light. It is the brightest channel rather than luminance because saturated red neon and stop lights halate the most on film.
+- `softness`: 0..255, default 32.
+  - `w = smoothstep(e0, e1, max(R,G,B))` with `e1 = min(255, t + s/2)`, so white always has weight 1.
+  - The halo source is `w·L·α`.
+  - The pixel's own share uses the weight map blurred by the same kernel: `E = H − L·(K∗w)`. Flat fields stay unchanged, and noisy areas near the threshold don't turn into speckle (review v1.1, C4).
+- Strength above 100 % in the excess model: `O = L + E·(1 + (a−1)·E/H)` (review v1.1, C5), so grain is not warmed. Thin dark details inside bright areas still glow at high strength; the remedy is a threshold above the background.
 
 ### Helpers
 - `core.blurFromSlider(u)` / `core.blurToSlider(m)`: log mapping between a slider u ∈ 0..100 and m ∈ 0.01..4 (×1 sits at u ≈ 76.9).
 - `core.blurMultiplier(settingsOrNumber)`: with a settings object, returns its normalized `blurMul`; with a number, applies the legacy 0..100 mapping.
 - `core.strengthToA(percent)`.
+- `core.baseLevelFor(width, height)`: the base level `createProcessor` picks for a work area. The loupe must use the apply's level, with its region origin aligned to `2^level`.
+- `p.fineRadius` and `p.pass2(data, comps, y0, rows, out, { dataY0, dataRows })`: Gaussians narrower than one base-grid pixel are computed at full resolution in pass 2. They need `fineRadius` rows of context above and below each strip, so `data` covers `[dataY0, dataY0 + dataRows)`, while `out` covers exactly the strip. Without the options, `data` is the strip itself (clamped context).
 - `core.loupeMargin(settings, docLongSide)`: integer pixels to read around a loupe region so the halo tail is complete. Capped at 1024.
 - `core.processImage(..., { view: 'halo' })` and `createProcessor({ ..., view: 'halo' })`: output only the halo, encoded through the curve, as the preview's "Только ореол" does. The default view is `'after'`.
 - `core.LOOKS`: an array of `{ id, name, description, settings }`, the built-in starting looks (names in Russian).
 - `core.layerNameFor(settings)`: the result layer name, `"Halation · <short Russian summary> [h1:<token>]"`. It is at most 255 characters, and the token carries the full settings, curve points included.
-- `core.settingsFromLayerName(name)`: settings, or null if the name carries no valid token. `core.isResultLayerName(name)`: true for names produced by `layerNameFor` and for the plain v1.0 name "Halation".
+- `core.settingsFromLayerName(name)`: settings, or null if the name carries no valid token. `core.isResultLayerName(name)`: true only for exactly "Halation" (v1.0) or a name ending with a parseable ` [h1:…]` token. A user layer such as "Halation glow", or a Photoshop copy ("… copy"), is not a result.

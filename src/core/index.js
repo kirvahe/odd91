@@ -25,6 +25,7 @@ module.exports = {
   renderPreview: V.renderPreview,
   createProcessor: P.createProcessor,
   processImage: P.processImage,
+  baseLevelFor: P.autoBaseLevel,
   LOOKS: PR.LOOKS,
   settingsToToken: PR.settingsToToken,
   settingsFromToken: PR.settingsFromToken,

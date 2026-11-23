@@ -24,7 +24,7 @@
     yAxis: "linear",      // "linear" | "log"
     view: "after",        // "before" | "after" | "halo"
     previewMode: "frame", // "frame" | "loupe"
-    zoom: 1,              // loupe zoom: 1 | 2
+    zoom: 1,              // loupe zoom: 0.5 | 1 | 2 (0.5 = 100 % Photoshop on Retina)
     replace: true,        // "Заменять прежний результат"
     k: "0.5",             // multiplier for interior curve points
     diagOpen: false
@@ -37,7 +37,7 @@
     if (ui.yAxis === "linear" || ui.yAxis === "log") out.yAxis = ui.yAxis;
     if (ui.view === "before" || ui.view === "after" || ui.view === "halo") out.view = ui.view;
     if (ui.previewMode === "frame" || ui.previewMode === "loupe") out.previewMode = ui.previewMode;
-    if (ui.zoom === 1 || ui.zoom === 2) out.zoom = ui.zoom;
+    if (ui.zoom === 0.5 || ui.zoom === 1 || ui.zoom === 2) out.zoom = ui.zoom;
     if (typeof ui.replace === "boolean") out.replace = ui.replace;
     if (typeof ui.k === "string" && ui.k.length < 32) out.k = ui.k;
     if (typeof ui.diagOpen === "boolean") out.diagOpen = ui.diagOpen;

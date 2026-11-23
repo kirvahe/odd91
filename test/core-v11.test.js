@@ -43,17 +43,20 @@ test('threshold: sources below it do not glow, sources above do', () => {
   assert.ok(on[nearLamp] > 0, 'the lamp still glows');
 });
 
-test('threshold weight table: smoothstep around the threshold, step when softness is 0', () => {
+test('threshold weight: smoothstep on the brightest channel, step when softness is 0, white always 1', () => {
   const tab = S.weightTable({ threshold: 128, softness: 64 });
+  assert.equal(tab.length, 256);
   let prev = -1;
   for (const v of tab) { assert.ok(v >= prev - 1e-7); prev = v; }
   const phys = S.physics({ threshold: 128, softness: 64 });
-  const atCode = (c) => S.lumaWeight(phys, T.SRGB_LUT[c]);
-  assert.ok(atCode(80) === 0 && atCode(170) === 1);
-  assert.ok(Math.abs(atCode(128) - 0.5) < 0.05);
+  assert.equal(S.pixelWeight(phys, 80, 80, 80), 0);
+  assert.equal(S.pixelWeight(phys, 170, 10, 10), 1, 'a saturated red pixel counts by its red channel');
+  assert.ok(Math.abs(S.pixelWeight(phys, 128, 0, 0) - 0.5) < 1e-6);
   const hard = S.physics({ threshold: 128, softness: 0 });
-  assert.equal(S.lumaWeight(hard, T.SRGB_LUT[127]), 0);
-  assert.equal(S.lumaWeight(hard, T.SRGB_LUT[129]), 1);
+  assert.equal(S.pixelWeight(hard, 127, 127, 127), 0);
+  assert.equal(S.pixelWeight(hard, 128, 0, 0), 1);
+  const top = S.physics({ threshold: 250, softness: 40 });
+  assert.equal(S.pixelWeight(top, 255, 255, 255), 1, 'the window is clamped to 255');
   assert.equal(S.weightTable({ threshold: 0 }), null);
 });
 
@@ -107,7 +110,9 @@ test('layer name token round-trips every setting and fits 255 characters', () =>
   }
   assert.equal(core.isResultLayerName('Halation'), true);
   assert.equal(core.isResultLayerName('Background'), false);
-  assert.equal(core.isResultLayerName('Halation copy 2'), true);
+  assert.equal(core.isResultLayerName('Halation copy 2'), false);
+  assert.equal(core.isResultLayerName('Halation glow'), false);
+  assert.equal(core.isResultLayerName(core.layerNameFor({}) + ' copy'), false);
   assert.equal(core.settingsFromLayerName('Halation'), null);
   assert.equal(core.settingsFromLayerName('Layer [h1:garbage]'), null);
 });
@@ -133,4 +138,84 @@ test('loupe margin grows with blur, covers the widest Gaussian and is capped', (
   const widest = 2.7684 * 3.3 * 0.0018 * 6000;
   assert.ok(a >= 3.5 * widest - 1);
   assert.equal(core.loupeMargin({ blurMul: 4 }, 60000), 1024);
+});
+
+function rng(seed) {
+  let x = seed >>> 0;
+  return () => { x = (x + 0x6d2b79f5) | 0; let t = Math.imul(x ^ (x >>> 15), 1 | x); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
+function noisy(w, h, mean, amp, seed) {
+  const r = rng(seed);
+  const d = new Uint8Array(w * h * 3);
+  for (let i = 0; i < w * h; i++) {
+    const v = Math.max(0, Math.min(255, Math.round(mean + (r() * 2 - 1) * amp)));
+    d[i * 3] = d[i * 3 + 1] = d[i * 3 + 2] = v;
+  }
+  return d;
+}
+function stats(out, ch) {
+  let s = 0, s2 = 0, n = 0;
+  for (let i = ch; i < out.length; i += 3) { s += out[i]; s2 += out[i] * out[i]; n++; }
+  const m = s / n;
+  return { mean: m, sd: Math.sqrt(s2 / n - m * m) };
+}
+
+test('no speckle near the threshold: a noisy field at the threshold barely changes', () => {
+  const w = 300, h = 200;
+  const d = noisy(w, h, 128, 3.5, 7);
+  const before = stats(d, 0);
+  for (const softness of [0, 8, 32]) {
+    const out = core.processImage(d, w, h, 3, { strength: 100, threshold: 128, softness }, { docLongSide: 3000 });
+    const after = stats(out, 0);
+    assert.ok(Math.abs(after.mean - before.mean) < 1.5, `softness ${softness}: mean ${after.mean.toFixed(2)} vs ${before.mean.toFixed(2)}`);
+    assert.ok(after.sd < before.sd + 1.5, `softness ${softness}: sd ${after.sd.toFixed(2)} vs ${before.sd.toFixed(2)}`);
+  }
+});
+
+test('strength above 100 %: grain is not warmed; a threshold keeps thin dark lines dark', () => {
+  const w = 300, h = 200;
+  const d = noisy(w, h, 128, 10, 11);
+  const before = stats(d, 0);
+  const out = core.processImage(d, w, h, 3, { strength: 400 }, { docLongSide: 3000 });
+  assert.ok(stats(out, 0).mean - before.mean < 4, 'red mean shift on grain at 400 %');
+  const line = fill(w, h, 150);
+  rect(line, w, 150, 0, 151, h, 40);
+  // Above a = 1 any dark detail inside a bright area glows (it cannot be told apart from the dark
+  // side of a lamp locally); the remedy, hinted in the panel, is a threshold above the background.
+  const o2 = core.processImage(line, w, h, 3, { strength: 400, threshold: 200, softness: 20 }, { docLongSide: 3000 });
+  const p = (100 * w + 150) * 3;
+  assert.equal(o2[p], 40, 'with a threshold above the background the dark line stays dark');
+});
+
+test('small blur on a >1 Mpx image matches the exact full-resolution kernel', () => {
+  const w = 1600, h = 1000; // 1.6 Mpx -> base level 1
+  assert.equal(core.baseLevelFor(w, h), 1);
+  const d = fill(w, h, 60);
+  rect(d, w, 300, 300, 340, 340, 255);
+  rect(d, w, 800, 100, 801, 900, 255);
+  rect(d, w, 1200, 500, 1203, 503, 255);
+  for (const blurMul of [0.01, 0.03, 0.05, 0.1, 0.25]) {
+    const s = { strength: 100, blurMul };
+    const apply = core.processImage(d, w, h, 3, s, { docLongSide: 6000 });
+    const exact = core.processImage(d, w, h, 3, s, { docLongSide: 6000, baseLevel: 0 });
+    let maxd = 0;
+    for (let i = 0; i < d.length; i++) maxd = Math.max(maxd, Math.abs(apply[i] - exact[i]));
+    assert.ok(maxd <= 4, `x${blurMul}: max difference ${maxd} codes`);
+  }
+});
+
+test('fine-kernel strips: result independent of strip height; pass2 without context still works', () => {
+  const w = 1300, h = 900;
+  const d = noisy(w, h, 90, 60, 5);
+  rect(d, w, 400, 400, 410, 410, 255);
+  const s = { strength: 150, blurMul: 0.02, threshold: 100, softness: 30 };
+  const ref = core.processImage(d, w, h, 3, s, { stripRows: 512, docLongSide: 6000 });
+  const p = core.createProcessor({ width: w, height: h, docLongSide: 6000, settings: s });
+  assert.ok(p.fineRadius > 0);
+  const other = core.processImage(d, w, h, 3, s, { stripRows: 7, docLongSide: 6000 });
+  assert.deepEqual(other, ref);
+  p.pass1(d, 3, 0, h);
+  core._internal.halo.runToEnd(p.blurSteps());
+  const out = new Uint8Array(w * 50 * 3);
+  p.pass2(d.subarray(100 * w * 3, 150 * w * 3), 3, 100, 50, out); // no context: clamped, no throw
 });

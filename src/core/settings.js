@@ -115,7 +115,7 @@ function normalizeSettings(partial) {
     radii = s.radii.map((r) => clampNum(r, 0.1, 4, 1));
   }
   let blurMul = 1;
-  if (s.blurMul !== undefined && Number.isFinite(Number(s.blurMul))) blurMul = clampNum(s.blurMul, BLUR_MIN, BLUR_MAX, 1);
+  if (s.blurMul !== undefined && s.blurMul !== null && s.blurMul !== '' && Number.isFinite(Number(s.blurMul))) blurMul = clampNum(s.blurMul, BLUR_MIN, BLUR_MAX, 1);
   else if (s.blur !== undefined) blurMul = clampNum(legacyBlurToMul(s.blur), BLUR_MIN, BLUR_MAX, 1);
   return {
     model: MODELS.indexOf(s.model) >= 0 ? s.model : 'excess',
@@ -138,30 +138,27 @@ function buildLutIn(settings) {
   return T.lutFromPoints(s.curvePoints);
 }
 
-// Source weight by display luminance: w = smoothstep(thr - soft/2, thr + soft/2, Y'), where
-// Y' = sRGB-encoded Rec.709 luminance in codes. Tabulated over linear luminance Y (4096 bins,
-// index = Y * 4095). Returns null when the threshold is off (w = 1 everywhere).
-const WEIGHT_N = 4095;
+// Source weight by the brightest channel: w = smoothstep(e0, e1, max(R, G, B)) in codes, with
+// e1 = min(255, t + s/2) so white always has weight 1. Brightest channel rather than luminance:
+// saturated red/orange sources (neon, stop lights) halate the most on film. 256 entries by code.
+// Returns null when the threshold is off (w = 1 everywhere).
 function weightTable(settings) {
   const s = normalizeSettings(settings);
   if (!(s.threshold > 0)) return null;
-  const tab = new Float32Array(WEIGHT_N + 1);
-  const e0 = s.threshold - s.softness / 2;
-  const e1 = s.threshold + s.softness / 2;
-  for (let i = 0; i <= WEIGHT_N; i++) {
-    const code = T.linearToSrgb(i / WEIGHT_N) * 255;
+  const tab = new Float32Array(256);
+  const e1 = Math.min(255, s.threshold + s.softness / 2);
+  const e0 = Math.min(s.threshold - s.softness / 2, e1);
+  for (let c = 0; c < 256; c++) {
     let w;
-    if (e1 <= e0) w = code >= s.threshold ? 1 : 0;
+    if (e1 - e0 < 1e-9) w = c >= s.threshold ? 1 : 0;
     else {
-      const t = Math.min(1, Math.max(0, (code - e0) / (e1 - e0)));
+      const t = Math.min(1, Math.max(0, (c - e0) / (e1 - e0)));
       w = t * t * (3 - 2 * t);
     }
-    tab[i] = w;
+    tab[c] = w;
   }
   return tab;
 }
-
-const LUMA = [0.2126, 0.7152, 0.0722];
 
 // Per-channel list of Gaussians {sigma, weight, wide}. sigma is in pixels of a grid where
 // one pixel = 1/scale document pixels (scale = 1 for full resolution).
@@ -201,30 +198,37 @@ function physics(settings) {
 // Weight of a pixel from its 8-bit codes (1 when the threshold is off).
 function pixelWeight(phys, r, g, b) {
   if (!phys.wTab) return 1;
-  const Y = LUMA[0] * T.SRGB_LUT[r] + LUMA[1] * T.SRGB_LUT[g] + LUMA[2] * T.SRGB_LUT[b];
-  return phys.wTab[(Y * WEIGHT_N + 0.5) | 0];
+  return phys.wTab[r > g ? (r > b ? r : b) : g > b ? g : b];
 }
 
-// Weight from a linear luminance value (preview blocks).
-function lumaWeight(phys, Y) {
+// Weight from the brightest channel given as sRGB-linear light (preview blocks), interpolated.
+function linearWeight(phys, linMax) {
   if (!phys.wTab) return 1;
-  const k = Y <= 0 ? 0 : Y >= 1 ? WEIGHT_N : (Y * WEIGHT_N + 0.5) | 0;
-  return phys.wTab[k];
+  const code = T.linearToSrgb(linMax) * 255;
+  const i = code >= 255 ? 254 : code <= 0 ? 0 : code | 0;
+  const f = Math.min(1, Math.max(0, code - i));
+  return phys.wTab[i] + f * (phys.wTab[i + 1] - phys.wTab[i]);
 }
 
 // Output linear light of one channel (reference implementation; hot loops inline this).
-function combine(phys, c, L, H, w) {
-  const e = H - (w === undefined ? 1 : w) * L;
-  if (phys.excess) return e > 0 ? L + phys.a[c] * e : L;
-  return L + phys.a[c] * e * phys.inv[c];
+// E = H - L*Hw: received halo minus the pixel's own share, where Hw is the source-weight map
+// blurred by the same kernel (1 without a threshold). Comparing with the neighbours' weights
+// rather than the pixel's own keeps noisy areas near the threshold from turning into speckle.
+// Excess model above a = 1: O = L + E*(1 + (a-1)*E/H) - the extra strength grows with the
+// relative excess, so grain and thin dark lines near bright areas are not inverted.
+function combine(phys, c, L, H, Hw) {
+  const e = H - (Hw === undefined ? 1 : Hw) * L;
+  const a = phys.a[c];
+  if (phys.excess) {
+    if (!(e > 0)) return L;
+    return a <= 1 ? L + a * e : L + e * (1 + ((a - 1) * e) / H);
+  }
+  return L + a * e * phys.inv[c];
 }
 
 // The halo part alone, for "halo only" views.
-function haloOnly(phys, c, L, H, w) {
-  if (phys.excess) {
-    const e = H - (w === undefined ? 1 : w) * L;
-    return e > 0 ? phys.a[c] * e : 0;
-  }
+function haloOnly(phys, c, L, H, Hw) {
+  if (phys.excess) return combine(phys, c, L, H, Hw) - L;
   return phys.a[c] * H * phys.inv[c];
 }
 
@@ -237,8 +241,6 @@ module.exports = {
   BLUR_MIN,
   BLUR_MAX,
   STRENGTH_MAX,
-  LUMA,
-  WEIGHT_N,
   normalizeSettings,
   blurMultiplier,
   blurFromSlider,
@@ -251,7 +253,7 @@ module.exports = {
   loupeMargin,
   physics,
   pixelWeight,
-  lumaWeight,
+  linearWeight,
   combine,
   haloOnly,
   MODELS,

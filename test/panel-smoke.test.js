@@ -275,6 +275,10 @@ test("panel v1.1: migration, presets, exact fields, threshold, loupe, settings f
     layers: [{ id: 1, name: "Фон", opaque: true, pixels: { left: 0, top: 0, w: W, h: H, data: rgbaNoise(W, H) } }],
   }, { "dev.halation.photoshop/settings": JSON.stringify(v10) });
   const core = ctx.HalationCore;
+  // record the options the loupe passes to processImage
+  const procOpts = [];
+  const realProcess = core.processImage;
+  core.processImage = (...a) => { procOpts.push(a[5]); return realProcess(...a); };
   panels.halationPanel.show();
   const state = ctx.HalationPanel.state;
   await waitFor(() => state.proxy && dom["preview-img"].src, "preview after show");
@@ -309,6 +313,17 @@ test("panel v1.1: migration, presets, exact fields, threshold, loupe, settings f
   assert.deepEqual(JSON.parse(storage.get("dev.halation.photoshop/presets")).presets, []);
   assert.ok(!items().some((it) => it.attrs.value === "user:Мой свет"));
 
+  // review v1.1 С7: a built-in look keeps the user's curve
+  pickRadio(dom["mode-group"], "curve");
+  const myCurve = [[100, 0.1], [200, 0.6]];
+  state.editor.setPoints(myCurve);
+  assert.equal(JSON.stringify(state.settings.curvePoints), JSON.stringify(myCurve));
+  const cine = items().find((it) => it.attrs.value === "look:" + core.LOOKS[1].id);
+  dom["preset-picker"].dispatch("change", { target: cine });
+  dom["btn-preset-load"].dispatch("click");
+  assert.equal(JSON.stringify(state.settings.curvePoints), JSON.stringify(myCurve), "look loaded, curve kept");
+  assert.equal(state.settings.mode, core.normalizeSettings(core.LOOKS[1].settings).mode);
+
   // exact entry: blur multiplier and strength %, validated and clamped
   dom["blur-field"].value = "0,05";
   dom["blur-field"].dispatch("change");
@@ -324,6 +339,14 @@ test("panel v1.1: migration, presets, exact fields, threshold, loupe, settings f
   dom["strength-field"].dispatch("keydown", { key: "Enter" });
   assert.equal(dom["strength-field"].value, "400 %");
   assert.match(dom["slider-message"].textContent, /введите число/);
+  // review v1.1 С5: the hint shows above 100 % only
+  assert.ok(!dom["strength-hint"].classList.contains("is-hidden"), "hint at 400 %");
+  dom["strength-field"].value = "100";
+  dom["strength-field"].dispatch("change");
+  assert.ok(dom["strength-hint"].classList.contains("is-hidden"), "no hint at 100 %");
+  dom["strength-slider"].value = 101;
+  dom["strength-slider"].dispatch("input");
+  assert.ok(!dom["strength-hint"].classList.contains("is-hidden"), "hint at 101 %");
 
   // threshold and softness
   dom["threshold-slider"].value = 128;
@@ -354,10 +377,24 @@ test("panel v1.1: migration, presets, exact fields, threshold, loupe, settings f
   assert.equal(fake.log.modal.filter((m) => m.commandName === "Halation: лупа").length, readsBefore + 1);
 
   // ×2 shows half the region, twice as large: still from the cache
+  // the loupe computes at the apply's base level, from a read aligned to the block grid
+  const loupeOpts = procOpts.filter((o) => o && o.originX !== undefined).at(-1);
+  assert.equal(loupeOpts.baseLevel, core.baseLevelFor(W, H));
+  const loupeRead = fake.log.getPixels.at(-1);
+  assert.equal(loupeRead.sourceBounds.left % 64, 0);
+  assert.equal(loupeRead.sourceBounds.top % 64, 0);
   pickRadio(dom["zoom-group"], "2");
   await waitFor(() => blobs.at(-1).width === 278 && state.ui.zoom === 2, "loupe ×2");
   assert.match(dom["preview-source"].textContent, /Лупа ×2/);
   assert.equal(fake.log.modal.filter((m) => m.commandName === "Halation: лупа").length, readsBefore + 1);
+
+  // ½: twice the area at one image pixel per document pixel, shown at half size
+  pickRadio(dom["zoom-group"], "0.5");
+  await waitFor(() => blobs.at(-1).width === W && state.ui.zoom === 0.5, "loupe ½");
+  assert.equal(dom["preview-img"].width, W / 2);
+  assert.match(dom["preview-source"].textContent, /Лупа ½/);
+  pickRadio(dom["zoom-group"], "1");
+  await waitFor(() => blobs.at(-1).width === 278, "loupe ×1 again");
 
   // back to the frame: the loupe area is outlined on the thumbnail
   pickRadio(dom["preview-mode-group"], "frame");
@@ -391,4 +428,12 @@ test("panel v1.1: migration, presets, exact fields, threshold, loupe, settings f
   assert.equal(state.settings.strength, applied.strength);
   assert.equal(state.settings.threshold, 128);
   assert.match(dom["preset-message"].textContent, /слой/);
+  assert.equal(JSON.stringify(state.settings.curvePoints), JSON.stringify(myCurve), "settings from a non-curve layer keep the curve");
+
+  // review v1.1 М5: a blocking check drops the loupe's plan and pixels
+  fake.doc.bitsPerChannel = "bitDepth16";
+  dom["btn-refresh"].dispatch("click");
+  await waitFor(() => /8 бит/.test(dom["preview-placeholder"].textContent), "blocking message");
+  assert.equal(state.previewPlan, null);
+  assert.equal(state.loupe.raw, null);
 });

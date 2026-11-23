@@ -230,3 +230,20 @@ test("curve editor (v1.1 flicker fix): same-size resize does not clear the canva
   ed.render();
   assert.equal(frames.length, 2, "a new frame after the previous one ran");
 });
+
+test("curve editor (review v1.1 М4): a dropped frame still draws; resize() draws at once", async () => {
+  const { canvas, calls } = fakeCanvas();
+  const clears = () => calls.filter((c) => c[0] === "fillRect" && c[1] === 0 && c[2] === 0).length;
+  const ed = new CurveEditor({ canvas, core, devicePixelRatio: 1, height: 170, requestFrame: () => {} }); // frames never come
+  const c0 = clears();
+  assert.equal(ed.resize(), false, "same size");
+  assert.equal(clears(), c0 + 1, "drawn synchronously anyway");
+  ed.render();
+  ed.render();
+  assert.equal(clears(), c0 + 1, "queued, not drawn yet");
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(clears(), c0 + 2, "the timeout drew the dropped frame once");
+  ed.render(); // queues again after the fallback ran
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(clears(), c0 + 3);
+});

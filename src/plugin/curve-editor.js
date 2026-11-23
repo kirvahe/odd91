@@ -58,6 +58,7 @@
   }
 
   var HIT_RADIUS = 8;        // CSS px
+  var FRAME_TIMEOUT_MS = 250; // fallback when a requested animation frame does not come
   var DOUBLE_CLICK_MS = 400;
   var DOUBLE_CLICK_PX = 6;
 
@@ -145,6 +146,8 @@
     // One render per frame (v1.1 flicker fix). Tests pass requestFrame: cb => cb().
     this._requestFrame = opts.requestFrame || defaultRequestFrame;
     this._frameQueued = false;
+    this._queuedAt = 0;
+    this._frameToken = 0;
     this._labelKey = null;
 
     var init = this.core.validateCurve(opts.points || this.core.defaultCurvePoints());
@@ -271,15 +274,19 @@
     w = Math.max(120, Math.floor(w));
     h = Math.max(80, Math.floor(h));
     var pw = Math.round(w * this.dpr), ph = Math.round(h * this.dpr);
-    if (w === this.cssWidth && h === this.cssHeight && this.canvas.width === pw && this.canvas.height === ph) return false;
-    this.cssWidth = w;
-    this.cssHeight = h;
-    this.canvas.width = pw;
-    this.canvas.height = ph;
-    this.canvas.style.width = w + "px";
-    this.canvas.style.height = h + "px";
-    this.renderNow(); // the canvas was just cleared: draw at once
-    return true;
+    var changed = !(w === this.cssWidth && h === this.cssHeight && this.canvas.width === pw && this.canvas.height === ph);
+    if (changed) {
+      this.cssWidth = w;
+      this.cssHeight = h;
+      this.canvas.width = pw;
+      this.canvas.height = ph;
+      this.canvas.style.width = w + "px";
+      this.canvas.style.height = h + "px";
+    }
+    // Always draw synchronously: a resize after a stalled frame must still show the curve
+    // (review v1.1 М4). Drawing without reassigning canvas.width does not flicker.
+    this.renderNow();
+    return changed;
   };
 
   P.destroy = function () {
@@ -393,18 +400,26 @@
 
   // ---------- drawing ----------
 
-  /** Schedule a redraw; several calls within one frame draw once. */
+  /** Schedule a redraw; several calls within one frame draw once. If the frame callback
+   *  never comes (UXP may drop it for a hidden panel), a timer draws after FRAME_TIMEOUT_MS
+   *  and a later render() call queues again (review v1.1 М4). */
   P.render = function () {
-    if (this._frameQueued) return;
+    var t = nowMs();
+    if (this._frameQueued && t - this._queuedAt < FRAME_TIMEOUT_MS) return;
     this._frameQueued = true;
+    this._queuedAt = t;
     var self = this;
+    var token = ++this._frameToken;
     this._requestFrame(function () {
-      self._frameQueued = false;
-      self.renderNow();
+      if (self._frameQueued && self._frameToken === token) self.renderNow();
     });
+    setTimeout(function () {
+      if (self._frameQueued && self._frameToken === token) self.renderNow();
+    }, FRAME_TIMEOUT_MS);
   };
 
   P.renderNow = function () {
+    this._frameQueued = false;
     var ctx = this.ctx, c = this.colors, d = this.dpr;
     if (!ctx) return;
     var W = this.canvas.width, H = this.canvas.height;

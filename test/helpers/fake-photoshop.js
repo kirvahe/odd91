@@ -337,6 +337,15 @@ function createFakePhotoshop(opts = {}) {
         bottom: Math.min(sel.bottom, sb.bottom),
       };
       if (!r || r.right <= r.left || r.bottom <= r.top) return { imageData: null, sourceBounds: null };
+      if (opts.selectionAnswer === "request") {
+        // The other possible answer: data the size of the request, bounds of the selection.
+        const rw = sb.right - sb.left, rh = sb.bottom - sb.top;
+        const full = new Uint8Array(rw * rh);
+        for (let y = r.top; y < r.bottom; y++) full.fill(255, (y - sb.top) * rw + (r.left - sb.left), (y - sb.top) * rw + (r.right - sb.left));
+        const img = makeImageData(rw, rh, 1, full);
+        img.colorSpace = "Grayscale";
+        return { imageData: img, sourceBounds: { ...sel } };
+      }
       const w = r.right - r.left, h = r.bottom - r.top;
       const img = makeImageData(w, h, 1, new Uint8Array(w * h).fill(255));
       img.colorSpace = "Grayscale";

@@ -19,7 +19,6 @@
   var SHOW_FALLBACK_MS = 3000;
   var PREVIEW_BOX_H = 280;      // fixed preview box height, keep in sync with .preview-wrap
   var LOUPE_DEBOUNCE_MS = 150;  // loupe re-render after a setting change
-  var LOUPE_ALIGN = 64;         // loupe reads start on this grid from the work-area origin
   var RESIZE_MIN_DELTA = 8;     // window-resize width changes below this are ignored
 
   function tryRequire(name) {
@@ -103,6 +102,7 @@
   var Bridge = window.HalationBridge;
   var Editor = window.HalationCurveEditor;
   var Store = window.HalationSettingsStore;
+  var Loupe = window.HalationLoupe;
   var diag = window.HalationDiagnostics.create({ pluginVersion: PLUGIN_VERSION });
 
   var state = {
@@ -159,6 +159,10 @@
   function setBusy(busy, label) {
     state.busy = busy;
     if (!busy) state.quietUntil = nowMs() + 800;
+    if (!busy && state.loupe && state.loupe.needsRead && state.ui && state.ui.previewMode === "loupe") {
+      // An update skipped while the panel was busy runs now (review М5).
+      setTimeout(function () { if (!state.busy) updateLoupe(true, "после занятости"); }, 0);
+    }
     var apply = $("btn-apply");
     setDisabled(apply, busy);
     if (apply) apply.textContent = busy && label ? label : "Применить";
@@ -285,6 +289,8 @@
 
   function renderSliderLabels() {
     var s = state.settings;
+    // review v1.1 С5: above 100 % thin dark details next to light ones glow too
+    show($("strength-hint"), s.strength > 100);
     for (var id in NUMBER_FIELDS) {
       if (Object.prototype.hasOwnProperty.call(NUMBER_FIELDS, id)) setField(id, NUMBER_FIELDS[id].text(s));
     }
@@ -680,16 +686,14 @@
     diag.set("target", rep);
     updateFromLayer(rep.activeLayer);
     updateMaskCheckbox(rep.selection);
-    if (rep.blocking.length) {
+    if (rep.blocking.length || rep.nothingToDo) {
+      // No source now: drop the frame cache and the loupe's plan and pixels (review М5).
       state.proxy = null;
+      state.previewPlan = null;
+      state.loupe.raw = null;
+      state.loupe.needsRead = false;
       updateStaleLabel();
-      setPreviewPlaceholder(rep.blocking.join(" "));
-      return;
-    }
-    if (rep.nothingToDo) {
-      state.proxy = null;
-      updateStaleLabel();
-      setPreviewPlaceholder(rep.nothingMessage);
+      setPreviewPlaceholder(rep.blocking.length ? rep.blocking.join(" ") : rep.nothingMessage);
       return;
     }
     var plan = rep.plans.layer || rep.plans.composite;
@@ -751,100 +755,34 @@
   // ------------------------------------------------------------------ loupe (v1.1)
   // A full-resolution region around a chosen point. The raw pixels (view + halo margin)
   // are read once per centre / document / layer; every setting change re-runs
-  // core.processImage on the cached pixels, so a halo a few pixels wide can be judged.
+  // core.processImage on the cached pixels at the apply's base level (review С1), so a
+  // halo a few pixels wide looks exactly as after «Применить». Geometry: loupe.js.
 
   function loupeZoom() {
-    return state.ui.zoom === 2 ? 2 : 1;
-  }
-
-  function rectW(r) { return r.right - r.left; }
-  function rectH(r) { return r.bottom - r.top; }
-
-  function rectContains(outer, inner) {
-    return !!outer && !!inner && outer.left <= inner.left && outer.top <= inner.top &&
-      outer.right >= inner.right && outer.bottom >= inner.bottom;
+    return Loupe.normZoom(state.ui.zoom);
   }
 
   function regionRect(region) {
     return { left: region.left, top: region.top, right: region.left + region.width, bottom: region.top + region.height };
   }
 
-  /** Document rectangle the loupe shows: (box size)/zoom around the centre, inside the work area. */
+  /** Base level «Применить» uses for the work area (core.baseLevelFor). */
+  function applyBaseLevel() {
+    var a = state.previewPlan && state.previewPlan.area;
+    if (!a || typeof core.baseLevelFor !== "function") return 0;
+    var l = Number(core.baseLevelFor(a.right - a.left, a.bottom - a.top));
+    return isFinite(l) && l > 0 ? Math.floor(l) : 0;
+  }
+
   function loupeViewRect() {
     var plan = state.previewPlan;
     if (!plan || !state.loupe.center) return null;
-    var a = plan.area, b = boxSize(), z = loupeZoom();
-    var rw = Math.max(1, Math.min(Math.floor(b.w / z), rectW(a)));
-    var rh = Math.max(1, Math.min(Math.floor(b.h / z), rectH(a)));
-    var left = Math.round(state.loupe.center.x - rw / 2);
-    var top = Math.round(state.loupe.center.y - rh / 2);
-    left = Math.max(a.left, Math.min(a.right - rw, left));
-    top = Math.max(a.top, Math.min(a.bottom - rh, top));
-    return { left: left, top: top, right: left + rw, bottom: top + rh };
+    return Loupe.viewRect(state.loupe.center, plan.area, boxSize(), loupeZoom());
   }
 
   function loupeMarginNow() {
     var m = Number(core.loupeMargin(state.settings, state.proxyDocLongSide || 1));
     return isFinite(m) && m > 0 ? Math.ceil(m) : 0;
-  }
-
-  /** The view plus the halo margin, clamped to the work area; the start is aligned to a
-   *  64-px grid from the area origin, like the full apply's pyramid blocks. */
-  function loupeReadRect(view, margin) {
-    var a = state.previewPlan.area;
-    var left = Math.max(a.left, view.left - margin);
-    var top = Math.max(a.top, view.top - margin);
-    left = a.left + Math.floor((left - a.left) / LOUPE_ALIGN) * LOUPE_ALIGN;
-    top = a.top + Math.floor((top - a.top) / LOUPE_ALIGN) * LOUPE_ALIGN;
-    return {
-      left: left,
-      top: top,
-      right: Math.min(a.right, view.right + margin),
-      bottom: Math.min(a.bottom, view.bottom + margin)
-    };
-  }
-
-  /** Copy a sub-rectangle out of a cached region. */
-  function cropRegion(region, rect) {
-    var c = region.components;
-    var w = rectW(rect), h = rectH(rect);
-    if (rect.left === region.left && rect.top === region.top && w === region.width && h === region.height) {
-      return { data: region.data, components: c, width: w, height: h };
-    }
-    var out = new Uint8Array(w * h * c);
-    for (var y = 0; y < h; y++) {
-      var s = ((rect.top - region.top + y) * region.width + (rect.left - region.left)) * c;
-      out.set(region.data.subarray(s, s + w * c), y * w * c);
-    }
-    return { data: out, components: c, width: w, height: h };
-  }
-
-  /** Crop to the view, flatten alpha over a checkerboard, enlarge by zoom (nearest). */
-  function loupeDisplayRgb(data, comps, srcW, srcRect, view, zoom) {
-    var vw = rectW(view), vh = rectH(view);
-    var W = vw * zoom, H = vh * zoom;
-    var out = new Uint8Array(W * H * 3);
-    for (var y = 0; y < H; y++) {
-      var dyDoc = Math.floor(y / zoom);
-      var sy = view.top - srcRect.top + dyDoc;
-      for (var x = 0; x < W; x++) {
-        var dxDoc = Math.floor(x / zoom);
-        var s = (sy * srcW + (view.left - srcRect.left + dxDoc)) * comps;
-        var d = (y * W + x) * 3;
-        if (comps === 4 && data[s + 3] < 255) {
-          var a = data[s + 3] / 255;
-          var bg = ((((view.left + dxDoc) >> 3) + ((view.top + dyDoc) >> 3)) & 1) ? 150 : 104;
-          out[d] = Math.round(data[s] * a + bg * (1 - a));
-          out[d + 1] = Math.round(data[s + 1] * a + bg * (1 - a));
-          out[d + 2] = Math.round(data[s + 2] * a + bg * (1 - a));
-        } else {
-          out[d] = data[s];
-          out[d + 1] = data[s + 1];
-          out[d + 2] = data[s + 2];
-        }
-      }
-    }
-    return { data: out, width: W, height: H };
   }
 
   function scheduleLoupe(stage) {
@@ -857,38 +795,42 @@
   }
 
   /* Render the loupe from the cache. Read from Photoshop only when allowRead is set and
-   * the cache does not cover the view plus the current margin (new centre, zoom ×1,
-   * larger blur). While a control is dragged (allowRead false) an uncovered margin is
-   * read on the final change. */
+   * the cache does not cover the view plus the current margin (new centre, zoom out,
+   * larger blur). Whatever cannot run now (a drag, or the panel is busy) leaves
+   * needsRead set; setBusy(false) and the next final change pick it up (review М5). */
   async function updateLoupe(allowRead, reason) {
     if (state.ui.previewMode !== "loupe") return;
     var plan = state.previewPlan;
     if (!plan) {
+      state.loupe.needsRead = false;
       setPreviewPlaceholder("Лупа появится после построения предпросмотра — нажмите «Обновить».");
       return;
     }
     if (!state.loupe.center) {
       state.loupe.center = { x: (plan.area.left + plan.area.right) / 2, y: (plan.area.top + plan.area.bottom) / 2 };
     }
+    var level = applyBaseLevel();
     var view = loupeViewRect();
-    var need = loupeReadRect(view, loupeMarginNow());
+    var need = Loupe.readRect(view, loupeMarginNow(), plan.area, level);
     var raw = state.loupe.raw;
-    var covered = !!raw && rectContains(regionRect(raw), need);
-    if (!covered) {
-      if (allowRead) {
+    if (!(raw && Loupe.rectContains(regionRect(raw), need))) {
+      if (allowRead && !state.busy) {
         if (!(await readLoupe(need, reason))) return;
-      } else if (!raw || !rectContains(regionRect(raw), view)) {
-        state.loupe.needsRead = true;
-        return;
       } else {
-        state.loupe.needsRead = true; // draw with the margin we have; read on the final change
+        state.loupe.needsRead = true;
+        if (!raw || !Loupe.rectContains(regionRect(raw), view)) return; // nothing usable yet
+        // otherwise draw with the margin we have; the read follows
       }
     }
-    renderLoupe(view, need);
+    renderLoupe(view, need, level);
   }
 
   async function readLoupe(rect, reason) {
-    if (!state.bridge || state.busy) return false;
+    if (!state.bridge) return false;
+    if (state.busy) {
+      state.loupe.needsRead = true;
+      return false;
+    }
     setBusy(true, "Лупа…");
     var progressEl = $("preview-progress");
     progressEl.textContent = "Читаю область для лупы…";
@@ -899,8 +841,10 @@
       state.loupe.needsRead = false;
       diag.set("loupe", region.stats);
       diag.log("Лупа: прочитано " + region.width + "×" + region.height + " с (" + region.left + ", " + region.top + ") — " + (reason || ""));
+      if (region.warning) diag.log("Лупа: " + region.warning);
       return true;
     } catch (e) {
+      state.loupe.needsRead = false; // no retry loop on errors
       var d = Bridge.describeError(e);
       if (d.kind === "cancelled") diag.log("Чтение для лупы отменено");
       else diag.error(e, "лупа: readRegion");
@@ -913,7 +857,7 @@
     }
   }
 
-  function renderLoupe(view, need) {
+  function renderLoupe(view, need, level) {
     var raw = state.loupe.raw;
     var have = regionRect(raw);
     var proc = {
@@ -922,7 +866,7 @@
       right: Math.min(need.right, have.right),
       bottom: Math.min(need.bottom, have.bottom)
     };
-    var src = cropRegion(raw, proc);
+    var src = Loupe.cropRegion(raw, proc);
     var v = state.ui.view;
     var t0 = nowMs();
     var out;
@@ -931,6 +875,7 @@
         originX: proc.left,
         originY: proc.top,
         docLongSide: state.proxyDocLongSide,
+        baseLevel: level, // the apply's level, not the one a small region would get
         view: v === "halo" ? "halo" : "after"
       });
     } catch (e) {
@@ -939,16 +884,19 @@
       return;
     }
     var ms = nowMs() - t0;
-    var img = loupeDisplayRgb(out, src.components, src.width, proc, view, loupeZoom());
+    var zoom = loupeZoom();
+    var img = Loupe.displayRgb(out, src.components, src.width, proc, view, zoom);
     var p = diag.info.loupe;
     if (p) {
       p.renderMs = ms;
-      p.proxySize = src.width + "×" + src.height + " (обработка), вид " + rectW(view) + "×" + rectH(view);
+      p.proxySize = src.width + "×" + src.height + " (обработка, уровень " + level + "), вид " + (view.right - view.left) + "×" + (view.bottom - view.top);
       diag.set("loupe", p);
     }
-    $("preview-source").textContent = "Лупа ×" + loupeZoom() + ": x " + view.left + "–" + view.right + ", y " + view.top + "–" + view.bottom +
-      " (" + (state.proxyLabel || "") + ")";
-    displayPreview(img, { w: img.width, h: img.height });
+    var zoomLabel = zoom === 0.5 ? "½" : "×" + zoom;
+    $("preview-source").textContent = raw.warning
+      ? "Лупа: Photoshop не отдал пиксели этой области — она прозрачна или слой изменился. Нажмите «Обновить»."
+      : "Лупа " + zoomLabel + ": x " + view.left + "–" + view.right + ", y " + view.top + "–" + view.bottom + " (" + (state.proxyLabel || "") + ")";
+    displayPreview(img, Loupe.displaySize(img, zoom));
   }
 
   function updateFrameOverlay() {
@@ -963,12 +911,12 @@
     var a = plan.area;
     var wrap = $("preview-wrap");
     var cw = wrap && wrap.clientWidth ? wrap.clientWidth : d.w + 2;
-    var sx = d.w / rectW(a), sy = d.h / rectH(a);
+    var sx = d.w / (a.right - a.left), sy = d.h / (a.bottom - a.top);
     var offX = (cw - d.w) / 2, offY = (PREVIEW_BOX_H - d.h) / 2; // the image is centred in the box
     fr.style.left = Math.round(offX + (view.left - a.left) * sx) + "px";
     fr.style.top = Math.round(offY + (view.top - a.top) * sy) + "px";
-    fr.style.width = Math.max(3, Math.round(rectW(view) * sx)) + "px";
-    fr.style.height = Math.max(3, Math.round(rectH(view) * sy)) + "px";
+    fr.style.width = Math.max(3, Math.round((view.right - view.left) * sx)) + "px";
+    fr.style.height = Math.max(3, Math.round((view.bottom - view.top) * sy)) + "px";
     show(fr, true);
   }
 
@@ -978,8 +926,8 @@
     setRadio($("zoom-group"), String(loupeZoom()));
     show($("zoom-group"), mode === "loupe");
     $("loupe-hint").textContent = mode === "loupe"
-      ? "Лупа 1:1. Другое место — в режиме «Кадр» щёлкните по картинке."
-      : "В режиме «Кадр» щёлкните по картинке — там откроется лупа 1:1.";
+      ? "Лупа. «½» на экране Retina — это 100 % Photoshop (UXP рисует панель в двойном масштабе). Другое место — щелчок по картинке в режиме «Кадр»."
+      : "В режиме «Кадр» щёлкните по картинке — там откроется лупа.";
     updateFrameOverlay();
   }
 
@@ -1006,7 +954,7 @@
     var fx = (e.clientX - r.left) / w, fy = (e.clientY - r.top) / h;
     if (!(fx >= 0 && fx <= 1 && fy >= 0 && fy <= 1)) return;
     var a = state.previewPlan.area;
-    state.loupe.center = { x: a.left + fx * rectW(a), y: a.top + fy * rectH(a) };
+    state.loupe.center = { x: a.left + fx * (a.right - a.left), y: a.top + fy * (a.bottom - a.top) };
     state.loupe.raw = null; // new centre: read again
     diag.log("Лупа: центр (" + Math.round(state.loupe.center.x) + ", " + Math.round(state.loupe.center.y) + ")");
     setPreviewMode("loupe", "щелчок по кадру");
@@ -1070,9 +1018,13 @@
     setDisabled($("btn-preset-load"), !p);
   }
 
-  /** Put a full settings object into the panel (preset, layer name). */
-  function loadSettings(settings, label) {
-    state.settings = core.normalizeSettings(settings);
+  /** Put a settings object into the panel (preset, layer name). keepCurve: keep the
+   *  user's curve points when the loaded settings do not carry their own (review С7). */
+  function loadSettings(settings, label, opts) {
+    var next = {};
+    for (var k in settings) if (Object.prototype.hasOwnProperty.call(settings, k)) next[k] = settings[k];
+    if (opts && opts.keepCurve) next.curvePoints = state.settings.curvePoints;
+    state.settings = core.normalizeSettings(next);
     if (state.editor) state.editor.setPoints(state.settings.curvePoints, { silent: true });
     applyStateToControls();
     scheduleSave();
@@ -1088,7 +1040,10 @@
       setMessage("preset-message", "Сначала выберите пресет в списке.");
       return;
     }
-    loadSettings(p.settings, "пресет «" + p.name + "»");
+    // Built-in looks carry no curve: keep the user's points unless the look is a curve
+    // look or brings its own points. User presets restore their curve on purpose.
+    var carriesCurve = !!p.settings && (p.settings.mode === "curve" || Array.isArray(p.settings.curvePoints));
+    loadSettings(p.settings, "пресет «" + p.name + "»", { keepCurve: p.builtIn && !carriesCurve });
   }
 
   function onPresetSave() {
@@ -1272,9 +1227,14 @@
         showStatus("warn", "Готово за " + sec + " с, но " + res.stats.toleratedStrips +
           " полос(ы) Photoshop не отдал и они сочтены прозрачными. Если там слой не прозрачный, результат неполный: " +
           "отмените (Cmd/Ctrl+Z) и примените ещё раз. Подробности — в «Диагностике».");
+      } else if (res.stats.maskWarning) {
+        // review v1.1 М2: an empty selection answer never ends in a plain «Готово»
+        diag.log("Маска не добавлена: " + res.stats.maskWarning);
+        showStatus("warn", "Готово за " + sec + " с: создан слой Halation " + placed + removed + " " + res.stats.maskWarning);
       } else {
+        var masked = !!(res.stats.mask && res.stats.mask.written);
         showStatus("ok", "Готово за " + sec + " с: создан слой Halation " + placed + removed +
-          (useMask ? " Маска слоя — по выделению." : ""));
+          (masked ? " Маска слоя — по выделению." : ""));
       }
     } catch (e) {
       var d = Bridge.describeError(e);
@@ -1435,10 +1395,10 @@
     });
     $("zoom-group").addEventListener("change", function (e) {
       var z = Number(radioValue($("zoom-group"), e));
-      if (z !== 1 && z !== 2) return;
+      if (Loupe.ZOOMS.indexOf(z) < 0) return;
       updateUi({ zoom: z });
       renderPreviewMode();
-      updateLoupe(true, "масштаб ×" + z);
+      updateLoupe(true, "масштаб " + z);
     });
     $("preview-img").addEventListener("click", onPreviewClick);
 
@@ -1461,7 +1421,8 @@
     $("btn-preset-delete").addEventListener("click", onPresetDelete);
     $("btn-from-layer").addEventListener("click", function () {
       var l = state.layerSettings;
-      if (l) loadSettings(l.settings, "слой «" + (l.name.length > 40 ? l.name.slice(0, 40) + "…" : l.name) + "»");
+      // The name token carries curve points only for curve mode.
+      if (l) loadSettings(l.settings, "слой «" + (l.name.length > 40 ? l.name.slice(0, 40) + "…" : l.name) + "»", { keepCurve: l.settings.mode !== "curve" });
     });
 
     $("mask-checkbox").addEventListener("change", function () {
