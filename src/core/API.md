@@ -118,3 +118,13 @@ This runs the same processor in one go.
 - `core.LOOKS`: an array of `{ id, name, description, settings }`, the built-in starting looks (names in Russian).
 - `core.layerNameFor(settings)`: the result layer name, `"Halation · <short Russian summary> [h1:<token>]"`. It is at most 255 characters, and the token carries the full settings, curve points included.
 - `core.settingsFromLayerName(name)`: settings, or null if the name carries no valid token. `core.isResultLayerName(name)`: true only for exactly "Halation" (v1.0) or a name ending with a parseable ` [h1:…]` token. A user layer such as "Halation glow", or a Photoshop copy ("… copy"), is not a result.
+
+## v1.1.1 additions (speed; perf plan review 2026-11-26)
+
+- Same results: when fine Gaussians are present, at most 1 code against v1.1.0, because paired taps change the float summation order. The share of differing values is about 1e-6, and up to 1.5e-5 on some frames in the halo-only view. Without fine Gaussians the output is bit-identical. Strip height and the zero-skip below change nothing.
+- The fine part runs as one interleaved pass when every channel has the same kernel (`radii` equal), with paired taps and padded edges. With a threshold, 16-column tiles whose neighbourhood holds only zero sources are skipped; their result is exactly zero either way.
+- Pass 2 finds the output code by a table over `sqrt(v)` when a pixel moves by two codes or more, with a binary search when the table start is more than one code away (curves with a nearly flat stretch). The code is the same as the old step-by-step search gave.
+- `p.costEstimate()` returns `{ read, blur, write }`: rough stage costs in ms (JIT, Photoshop I/O included). They are for progress weights only.
+- `p.stats.timings.fine`: ms spent on the fine part, a share of `pass2`.
+- `createProcessor` / `processImage` option `_noSkip: true` turns the zero-skip off. It is for tests only.
+- Fine-part buffers live in the processor and are reused by every strip.

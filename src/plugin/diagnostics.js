@@ -148,6 +148,11 @@
       if (parts.length) out.push("  Этапы: " + parts.join(", "));
       out.push("  getPixels: " + (s.getPixelsCalls || 0) + " вызовов, прочитано " + fmtMB(s.bytesRead) +
         "; putPixels: " + (s.putPixelsCalls || 0) + " вызовов, записано " + fmtMB(s.bytesWritten));
+      if (s.io && (s.io.getPixelsMs || s.io.putPixelsMs)) {
+        out.push("  Photoshop: getPixels " + fmtMs(s.io.getPixelsMs) + ", getData " + fmtMs(s.io.getDataMs) +
+          ", putPixels " + fmtMs(s.io.putPixelsMs) + (s.yields ? "; уступок управления " + s.yields.count + " (" + fmtMs(s.yields.ms) + ")" : ""));
+      }
+      if (s.progressWeights) out.push("  Веса прогресса: " + safeJson(s.progressWeights));
       if (s.strips) out.push("  Полосы: " + s.strips + " по " + s.stripRows + " строк; пустых " + (s.emptyStrips || 0) +
         "; терпимых ошибок чтения " + (s.toleratedErrors || 0));
       if (s.toleratedMessages && s.toleratedMessages.length) out.push("  Ошибки пустых полос: " + s.toleratedMessages.join(" | "));

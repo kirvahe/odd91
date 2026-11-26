@@ -109,12 +109,14 @@ test("diagnostics: report has versions, document, timings, read counters, raw pi
     layer: { id: 3, name: "Слой", kind: "pixel", bounds: { left: 0, top: 0, right: 10, bottom: 10 }, opacity: 100, fillOpacity: 100, blendMode: "normal" },
     warnings: ["w1"],
   });
-  d.set("apply", { ok: true, mode: "layer", area: { left: 0 }, timings: { read: 1200, blur: 9000, write: 15000 }, getPixelsCalls: 48, bytesRead: 192 * 1048576, putPixelsCalls: 24, bytesWritten: 96 * 1048576 });
+  d.set("apply", { ok: true, mode: "layer", area: { left: 0 }, timings: { read: 1200, blur: 9000, write: 15000 }, getPixelsCalls: 48, bytesRead: 192 * 1048576, putPixelsCalls: 24, bytesWritten: 96 * 1048576,
+    io: { getPixelsMs: 310, getDataMs: 120, putPixelsMs: 840 }, yields: { count: 77, ms: 15 }, progressWeights: { read: 0.08, blur: 0.08, write: 0.84 } });
   d.set("colorRaw", [{ RGBFloatColor: { red: 1, grain: 0.5, blue: 0 } }]);
   const err = new Error("boom");
   d.error(err, "apply");
   const r = d.report();
-  for (const part of ["Плагин: 1.0.0", "Photoshop: 26.7.0", "uxp-8.1.0", "6000×4000", "8 бит", "48 вызовов", "192.0 МБ", "blur 9000 мс", "RGBFloatColor", "boom", "Стек:"]) {
+  for (const part of ["Плагин: 1.0.0", "Photoshop: 26.7.0", "uxp-8.1.0", "6000×4000", "8 бит", "48 вызовов", "192.0 МБ", "blur 9000 мс", "RGBFloatColor", "boom", "Стек:",
+    "getPixels 310 мс", "putPixels 840 мс", "уступок управления 77", "Веса прогресса", "\"write\":0.84"]) {
     assert.ok(r.includes(part), "report misses: " + part);
   }
 });

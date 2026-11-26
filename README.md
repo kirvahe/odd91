@@ -26,7 +26,9 @@
 ```bash
 npm test          # тесты ядра, связки с Photoshop (на подделке) и сборки
 npm run build     # dist/dev.halation.photoshop_PS.ccx и распакованная папка
-npm run bench     # замер скорости без JIT, как в Photoshop
+npm run bench     # замер скорости ядра с JIT (как в UXP), в том числе малое размытие и настройки Ильи
+npm run perf      # проверка скорости перед выпуском: отношения ко времени ×1, границы между v1.1.1 и v1.1.0
+npm run bench:jitless  # худший случай, без JIT
 ```
 
 Нужен Node 21+, зависимостей нет.

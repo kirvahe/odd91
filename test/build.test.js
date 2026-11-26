@@ -69,7 +69,7 @@ function checkPackage(dir, entries) {
   assert.equal(m.manifestVersion, 5);
   assert.equal(m.id, ID);
   assert.equal(m.name, "Halation");
-  assert.equal(m.version, "1.1.0");
+  assert.equal(m.version, "1.1.1");
   assert.equal(m.version, PKG.version);
   assert.equal(m.main, "index.html");
   assert.equal(typeof m.host, "object");

@@ -2,7 +2,7 @@
   "manifestVersion": 5,
   "id": "dev.halation.photoshop",
   "name": "Halation",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "main": "index.html",
   "host": {
     "app": "PS",

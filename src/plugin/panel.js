@@ -7,7 +7,7 @@
 (function () {
   "use strict";
 
-  var PLUGIN_VERSION = "1.1.0"; // checked against manifest.json by tools/build-ccx.mjs
+  var PLUGIN_VERSION = "1.1.1"; // checked against manifest.json by tools/build-ccx.mjs
   var PANEL_ID = "halationPanel";
   var PREVIEW_MAX_SIDE = 500;
   // Two-stage preview (src/core/API.md): a half-size draft while something moves,

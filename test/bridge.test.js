@@ -287,12 +287,23 @@ test("apply: the default strip height from the core gives the same result", asyn
   assert.equal(ra.stats.strips, 1, "a small layer fits one ~1 Mpx strip");
 });
 
-for (const [label, cancelAt, created] of [["blur", 0.2, 0], ["write", 0.6, 1]]) {
+// Stage weights follow core.costEstimate() since v1.1.1, so the cancel points are taken from them:
+// the middle of the blur stage and the middle of the write stage (review v1.1.1 С3).
+async function stageMiddle(stage) {
+  const probe = offsetLayerFake("null");
+  const plan = (await makeBridge(probe).bridge.inspect({})).plans.layer;
+  const a = plan.area;
+  const w = Bridge.stageWeights(core.createProcessor({ width: a.right - a.left, height: a.bottom - a.top, docLongSide: plan.docLongSide, settings: SETTINGS }));
+  return stage === "blur" ? w.read + w.blur / 2 : w.read + w.blur + w.write / 2;
+}
+for (const [label, created] of [["blur", 0], ["write", 1]]) {
   test(`apply: cancellation during ${label} rolls back and disposes everything`, async () => {
     // the fake sets isCancelled once reported progress reaches cancelAt
+    const cancelAt = await stageMiddle(label);
     const fake = offsetLayerFake("null", { cancelAtProgress: cancelAt });
     const { bridge } = makeBridge(fake, { stripRows: 4 });
     const plan = (await bridge.inspect({})).plans.layer;
+    const strips = Math.ceil((plan.area.bottom - plan.area.top) / 4);
     const idsBefore = fake.doc.layers.map((l) => l.id);
     await assert.rejects(bridge.apply({ settings: SETTINGS, plan }), (err) => {
       assert.ok(Bridge.isCancelError(err), "cancel error: " + err.message);
@@ -301,6 +312,7 @@ for (const [label, cancelAt, created] of [["blur", 0.2, 0], ["write", 0.6, 1]]) 
       return true;
     });
     assert.equal(fake.log.created.length, created);
+    if (label === "write") assert.ok(fake.log.putPixels.length > 0 && fake.log.putPixels.length < strips, `stopped mid-write: ${fake.log.putPixels.length} of ${strips} strips`);
     assert.deepEqual(fake.doc.layers.map((l) => l.id), idsBefore, "document rolled back");
     assert.equal(fake.log.rollbacks, 1);
     assert.equal(fake.log.resume.length, 0, "history not committed");
@@ -998,4 +1010,13 @@ test("with the real core: a level-1 apply (fine gaussians in pass 2) matches pro
   if (level >= 1 && res.stats.fineRadius > 0) {
     assert.ok(fake.log.getPixels.slice(Math.ceil(H / 37)).some((g) => g.sourceBounds.bottom - g.sourceBounds.top > 37), "overlapping reads used");
   }
+  // v1.1.1: progress weights from the core's cost estimate; fine Gaussians make writing the heavy stage
+  const pw = res.stats.progressWeights;
+  assert.ok(pw && Math.abs(pw.read + pw.blur + pw.write - 1) < 0.01, JSON.stringify(pw));
+  assert.ok(pw.read >= 0.05 - 1e-9 && pw.blur >= 0.05 - 1e-9 && pw.write >= 0.05 - 1e-9, "each stage at least 5 %");
+  if (res.stats.fineRadius > 0) assert.ok(pw.write > 0.55, "write weight " + pw.write);
+  assert.ok(res.stats.io.getPixelsMs >= 0 && res.stats.io.putPixelsMs >= 0 && res.stats.yields.count > 0);
+  const vals = fake.log.progress;
+  for (let i = 1; i < vals.length; i++) assert.ok(vals[i] >= vals[i - 1], "progress never goes back");
+  assert.ok(Math.abs(vals[vals.length - 1] - 1) < 1e-9, "progress ends at 1");
 });

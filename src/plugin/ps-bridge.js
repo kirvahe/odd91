@@ -29,8 +29,25 @@
   var RESULT_LAYER_NAME = "Halation";
   var COMMAND_NAME = "Halation";
   var PREVIEW_STRIP_PIXELS = 1 << 20; // ~1 Mpx per preview strip
-  // Progress weights (doc §5.6): read 10 %, blur 35 %, write 55 %.
+  // Default progress weights (doc §5.6): read 10 %, blur 35 %, write 55 %. Since v1.1.1 apply
+  // uses the core's cost estimate instead: with small blur pass 2 takes up to 90 % of the time
+  // (perf review М2) and the bar seemed stuck at "запись".
   var WEIGHTS = Object.freeze({ read: 0.10, blur: 0.35, write: 0.55 });
+
+  // Stage weights from proc.costEstimate() (core 1.1.1): 5 % each plus 85 % shared by cost, so
+  // each is at least 5 % and they sum to 1.
+  function stageWeights(proc) {
+    var c = null;
+    try {
+      c = proc && typeof proc.costEstimate === "function" ? proc.costEstimate() : null;
+    } catch (e) {
+      c = null;
+    }
+    if (!c || !(c.read > 0) || !(c.blur > 0) || !(c.write > 0)) return WEIGHTS;
+    var sum = c.read + c.blur + c.write;
+    var r = 0.05 + 0.85 * c.read / sum, b = 0.05 + 0.85 * c.blur / sum;
+    return { read: r, blur: b, write: 1 - r - b };
+  }
 
   // ---------------------------------------------------------------- errors
 
@@ -877,8 +894,13 @@
       return psCore.executeAsModal(fn, options);
     }
 
-    async function checkpoint(ctx) {
+    async function checkpoint(ctx, stats) {
+      var t = stats ? now() : 0;
       await yieldFn();
+      if (stats) {
+        stats.yields.count++;
+        stats.yields.ms += now() - t;
+      }
       if (ctx && ctx.isCancelled) throw cancelledError();
     }
 
@@ -922,7 +944,10 @@
         toleratedErrors: 0,
         toleratedMessages: [],
         strips: 0,
-        stripRows: 0
+        stripRows: 0,
+        // v1.1.1: time inside Photoshop's imaging calls and in the yields between steps
+        io: { getPixelsMs: 0, getDataMs: 0, putPixelsMs: 0 },
+        yields: { count: 0, ms: 0 }
       };
     }
 
@@ -945,7 +970,9 @@
         try {
           try {
             stats.getPixelsCalls++;
+            var tg = now();
             res = await imaging.getPixels(opts);
+            stats.io.getPixelsMs += now() - tg;
           } catch (err) {
             if ((ctx && ctx.isCancelled) || isCancelError(err) || isModalBusyError(err)) throw err;
             if (!o || !o.tolerate) throw err;
@@ -977,7 +1004,9 @@
             stats.emptyStrips++;
             return emptyStrip(h);
           }
+          var td = now();
           var raw = await imageData.getData({ chunky: true });
+          stats.io.getDataMs += now() - td;
           var len = raw ? raw.length : 0;
           stats.bytesRead += raw && raw.byteLength !== undefined ? raw.byteLength : len;
           var comps = num(imageData.components);
@@ -1031,6 +1060,7 @@
           colorProfile: meta.colorProfile || ""
         });
         stats.putPixelsCalls++;
+        var tp = now();
         await imaging.putPixels({
           documentID: docId,
           layerID: layerId,
@@ -1041,6 +1071,7 @@
           targetBounds: { left: left, top: top },
           commandName: COMMAND_NAME
         });
+        stats.io.putPixelsMs += now() - tp;
         stats.bytesWritten += buf.length;
       } finally {
         if (img && typeof img.dispose === "function") img.dispose();
@@ -1372,7 +1403,9 @@
             // selection fails before any pixel work; an empty one means no mask + warning.
             var maskBuf = null;
             if (args.maskToSelection) {
+              var tsel = now();
               var sm = await readSelectionMask(doc.id, plan.area, stats);
+              stats.timings.selection = now() - tsel;
               stats.mask = sm.info;
               maskBuf = sm.mask;
               if (!maskBuf) stats.maskWarning = sm.info.warning;
@@ -1406,6 +1439,8 @@
             });
             var rows = chooseRows(proc, W, H);
             var nStrips = Math.ceil(H / rows);
+            var WT = stageWeights(proc);
+            stats.progressWeights = { read: +WT.read.toFixed(3), blur: +WT.blur.toFixed(3), write: +WT.write.toFixed(3) };
             stats.strips = nStrips;
             stats.stripRows = rows;
             var mayBeEmpty = tolerancePolicy(plan, area, nStrips);
@@ -1423,8 +1458,8 @@
               had[i] = stripHasPixels(s1, 0, h);
               if (s1.tolerated) stats.toleratedStrips++;
               proc.pass1(s1.data, s1.components, y0, h);
-              report(WEIGHTS.read * (i + 1) / nStrips, "чтение");
-              await checkpoint(ctx);
+              report(WT.read * (i + 1) / nStrips, "чтение");
+              await checkpoint(ctx, stats);
             }
             stats.timings.read = now() - t;
             if (had.indexOf(true) < 0) {
@@ -1436,8 +1471,8 @@
             // Blur on the pyramid, yielding between steps.
             t = now();
             for (var prog of proc.blurSteps()) {
-              report(WEIGHTS.read + WEIGHTS.blur * clamp01(prog), "размытие");
-              await checkpoint(ctx);
+              report(WT.read + WT.blur * clamp01(prog), "размытие");
+              await checkpoint(ctx, stats);
             }
             stats.timings.blur = now() - t;
 
@@ -1476,8 +1511,8 @@
               if (fr > 0) proc.pass2(s2.data, s2.components, y0, h, out, { dataY0: dY0, dataRows: dRows });
               else proc.pass2(s2.data, s2.components, y0, h, out);
               if (stripHas) await writeStrip(doc.id, resultId, out, W, stripPart(s2, sy, h, W), area, y0, reader.meta, stats, pool);
-              report(WEIGHTS.read + WEIGHTS.blur + WEIGHTS.write * (i + 1) / nStrips, "запись");
-              await checkpoint(ctx);
+              report(WT.read + WT.blur + WT.write * (i + 1) / nStrips, "обработка и запись");
+              await checkpoint(ctx, stats);
             }
             stats.timings.write = now() - t;
 
@@ -1687,6 +1722,7 @@
     isRelevantEvent: isRelevantEvent,
     ScratchPool: ScratchPool,
     SRGB_PROFILE: SRGB_PROFILE,
-    WEIGHTS: WEIGHTS
+    WEIGHTS: WEIGHTS,
+    stageWeights: stageWeights
   };
 });
