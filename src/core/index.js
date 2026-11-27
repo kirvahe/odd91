@@ -8,7 +8,7 @@ const V = require('./preview');
 const PR = require('./presets');
 
 module.exports = {
-  VERSION: '1.1.1',
+  VERSION: '1.1.2',
   DEFAULTS: S.DEFAULTS,
   normalizeSettings: S.normalizeSettings,
   defaultCurvePoints: T.defaultCurvePoints,
@@ -21,6 +21,10 @@ module.exports = {
   strengthToA: S.strengthToA,
   colorGains: S.colorGains,
   loupeMargin: S.loupeMargin,
+  LAMBDA_FRACTION: S.LAMBDA_FRACTION,
+  haloRadiusFactors: S.haloRadiusFactors,
+  haloRadii: S.haloRadii,
+  speedProbe: require('./probe').speedProbe,
   createPreviewBuilder: V.createPreviewBuilder,
   renderPreview: V.renderPreview,
   createProcessor: P.createProcessor,

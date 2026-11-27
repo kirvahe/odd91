@@ -69,7 +69,7 @@ function checkPackage(dir, entries) {
   assert.equal(m.manifestVersion, 5);
   assert.equal(m.id, ID);
   assert.equal(m.name, "Halation");
-  assert.equal(m.version, "1.1.1");
+  assert.equal(m.version, "1.1.2");
   assert.equal(m.version, PKG.version);
   assert.equal(m.main, "index.html");
   assert.equal(typeof m.host, "object");
@@ -165,4 +165,36 @@ test("build: plugin scripts load as plain <script>s and define their globals", (
   assert.equal(typeof sandbox.HalationBridge.createBridge, "function");
   // panel.js at least parses
   new vm.Script(fs.readFileSync(path.join(dir, "panel.js"), "utf8"), { filename: "panel.js" });
+});
+
+// v1.1.2 (plan review С1): `.is-hidden` sat above `.hint`, `.row` and `.preview-img`, which set
+// `display` with the same specificity, so seven elements were never hidden. The hiding rule must
+// be the last rule of the stylesheet and must name every class that sets `display` itself.
+test("styles: the hiding rule is the last one and wins over every class that sets display", () => {
+  const css = fs.readFileSync(path.join(ROOT, "src", "plugin", "styles.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({ sel: m[1].trim(), body: m[2] }));
+  const last = rules.at(-1);
+  assert.equal(last.sel, ".is-hidden", "the last rule is the plain hiding rule, alone (a rejected selector cannot take it down)");
+  assert.match(last.body, /^\s*display:\s*none;\s*$/);
+  const compound = rules.at(-2);
+  assert.match(compound.body, /^\s*display:\s*none;\s*$/);
+  const hidingSelectors = compound.sel.split(",").map((x) => x.trim());
+  assert.ok(hidingSelectors.every((x) => /^\.[a-z0-9-]+\.is-hidden$/.test(x)), compound.sel);
+  // classes that appear together with is-hidden in the panel markup
+  const html = fs.readFileSync(path.join(ROOT, "src", "plugin", "index.html"), "utf8");
+  const together = new Set();
+  for (const m of html.matchAll(/class="([^"]*\bis-hidden\b[^"]*)"/g)) {
+    for (const c of m[1].split(/\s+/)) if (c && c !== "is-hidden") together.add(c);
+  }
+  assert.ok(together.has("hint") && together.has("row") && together.has("preview-img"));
+  for (const r of rules.slice(0, -2)) {
+    if (!/display\s*:/.test(r.body)) continue;
+    for (const sel of r.sel.split(",").map((x) => x.trim())) {
+      const m = /^\.([a-z0-9-]+)$/i.exec(sel);
+      if (!m || !together.has(m[1])) continue;
+      assert.ok(hidingSelectors.includes("." + m[1] + ".is-hidden"), "." + m[1] + " sets display and needs ." + m[1] + ".is-hidden in the hiding rule");
+    }
+  }
+  // the old always-visible report field is gone from the markup
+  assert.ok(!/<textarea/.test(html), "no <textarea> in index.html: the fallback field is created on a clipboard failure only");
 });

@@ -8,6 +8,7 @@ const assert = require("node:assert/strict");
 const core = require("../src/core");
 const Bridge = require("../src/plugin/ps-bridge.js");
 const Color = require("../src/plugin/color-utils.js");
+const Diagnostics = require("../src/plugin/diagnostics.js");
 const { createFakePhotoshop } = require("./helpers/fake-photoshop.js");
 
 const SETTINGS = core.normalizeSettings({ strength: 80, blur: 40 });
@@ -699,12 +700,18 @@ test("change notifications only mark stale: tool selection ignored, layer/docume
   const fake = oneLayer();
   const { bridge } = makeBridge(fake);
   const got = [];
-  bridge.watchChanges((name) => got.push(name));
+  const targets = [];
+  bridge.watchChanges((name, target) => { got.push(name); targets.push(target); });
   fake.fire("select", { _target: [{ _ref: "moveTool" }] });
   fake.fire("select", { _target: [{ _ref: "layer", _name: "Слой" }] });
   fake.fire("select", { _target: [{ _ref: "document", _id: 2 }] });
   fake.fire("make", { _target: [{ _ref: "layer" }] });
-  assert.deepEqual(got, ["select", "select", "make"]);
+  fake.fire("delete", { _target: [{ _ref: "layer", _id: 8 }, { _ref: "document", _id: 59 }] });
+  fake.fire("set", { _target: { _ref: "layer", _enum: "ordinal", _value: "targetEnum" } });
+  fake.fire("crop", {});
+  assert.deepEqual(got, ["select", "select", "make", "delete", "set", "crop"]);
+  // v1.1.2: what the event was about, ids only (layer names never reach the journal)
+  assert.deepEqual(targets, ["layer", "document#2", "layer", "layer#8, document#59", "layer:targetEnum", ""]);
   assert.equal(fake.log.getPixels.length, 0);
   assert.equal(fake.log.modal.length, 0);
 });
@@ -1016,7 +1023,132 @@ test("with the real core: a level-1 apply (fine gaussians in pass 2) matches pro
   assert.ok(pw.read >= 0.05 - 1e-9 && pw.blur >= 0.05 - 1e-9 && pw.write >= 0.05 - 1e-9, "each stage at least 5 %");
   if (res.stats.fineRadius > 0) assert.ok(pw.write > 0.55, "write weight " + pw.write);
   assert.ok(res.stats.io.getPixelsMs >= 0 && res.stats.io.putPixelsMs >= 0 && res.stats.yields.count > 0);
+  // v1.1.2: reads split by pass, per-strip core times, the speed probe on both sides of the work
+  const st = res.stats;
+  const nStrips = Math.ceil(H / 37);
+  assert.equal(st.passIo.length, 2);
+  assert.equal(st.passIo[0].bytes + st.passIo[1].bytes, st.bytesRead, "every byte read belongs to a pass");
+  assert.ok(st.passIo[0].bytes > 0 && st.passIo[1].bytes >= st.passIo[0].bytes, "pass 2 re-reads at least as much (context rows)");
+  assert.ok(Math.abs(st.passIo[0].ms + st.passIo[1].ms - (st.io.getPixelsMs + st.io.getDataMs)) < 1e-6);
+  assert.ok(st.io.createMs >= 0);
+  for (const k of ["pass1", "pass2"]) {
+    const q = st.stripMs[k];
+    assert.ok(q && q.first >= 0 && q.median >= 0 && q.max >= q.median && q.max >= q.first, k + " " + JSON.stringify(q));
+  }
+  assert.equal(st.strips, nStrips);
+  assert.equal(st.probe.before.sum, core.speedProbe().sum);
+  assert.equal(st.probe.after.sum, st.probe.before.sum);
+  assert.ok(st.probe.before.min <= st.probe.before.first + 1e-9);
+  assert.deepEqual(st.memory, { before: null, after: null }, "no os module in this bridge: memory is unknown, not zero");
   const vals = fake.log.progress;
   for (let i = 1; i < vals.length; i++) assert.ok(vals[i] >= vals[i - 1], "progress never goes back");
   assert.ok(Math.abs(vals[vals.length - 1] - 1) < 1e-9, "progress ends at 1");
+});
+
+// v1.1.2 (code review С1, М1 and its surviving mutants): where the diagnostics timers sit. A manual
+// clock moves only inside the calls under test, so every timer shows exactly what it covers.
+function clockedBridge(fake, opts = {}) {
+  let t = 0;
+  const im = fake.photoshop.imaging;
+  const wrap = (name, ms) => {
+    const orig = im[name].bind(im);
+    im[name] = async (...a) => { t += ms; return orig(...a); };
+  };
+  wrap("getPixels", 2);
+  wrap("createImageDataFromBuffer", 3);
+  wrap("putPixels", 5);
+  const coreX = Object.assign({}, core, {
+    speedProbe: () => { t += 1000; return { first: 9, min: 4, sum: 372855 }; },
+    createProcessor: (o) => {
+      const p = core.createProcessor(o);
+      const wrapped = Object.create(p);
+      wrapped.pass1 = (...a) => { t += 7; return p.pass1(...a); };
+      wrapped.pass2 = (...a) => { t += 11; return p.pass2(...a); };
+      wrapped.blurSteps = function* () { for (const v of p.blurSteps()) { t += 13; yield v; } };
+      return wrapped;
+    },
+  });
+  let free = 8e9;
+  const bridge = Bridge.createBridge({
+    photoshop: fake.photoshop, core: coreX, color: Color, yieldFn: () => Promise.resolve(), log() {},
+    stripRows: opts.stripRows, now: () => t,
+    os: opts.noOs ? undefined : { freemem: () => (free -= 1e9) },
+  });
+  return { bridge };
+}
+
+function plainFake(w, h, extra) {
+  return createFakePhotoshop(Object.assign({ width: w, height: h, layers: [{ id: 1, name: "Фон", opaque: true, pixels: { left: 0, top: 0, w, h, data: makePixels(w, h) } }] }, extra));
+}
+
+test("apply v1.1.2: probes sit outside the stage timers, strip times cover the core only, reads and writes are timed apart", async () => {
+  const fake = plainFake(40, 30);
+  const { bridge } = clockedBridge(fake, { stripRows: 8 });
+  const res = await bridge.apply({ settings: SETTINGS, plan: (await bridge.inspect({})).plans.layer });
+  const st = res.stats;
+  const n = 4; // 30 rows in strips of 8
+  assert.equal(st.strips, n);
+  // each stage holds exactly its own calls; the two probes (1000 ms each) are in none of them
+  assert.equal(st.timings.read, n * (2 + 7));
+  assert.equal(st.timings.write, n * (2 + 11 + 3 + 5));
+  assert.ok(st.timings.blur > 0 && st.timings.blur % 13 === 0, "blur stage: " + st.timings.blur);
+  assert.equal(st.timings.total, 2000 + st.timings.read + st.timings.blur + st.timings.write + st.timings.layer);
+  assert.deepEqual(st.probe, { before: { first: 9, min: 4, sum: 372855, ms: 1000 }, after: { first: 9, min: 4, sum: 372855, ms: 1000 } });
+  // per-strip times: the core call alone, without the read before it or the write after it
+  assert.deepEqual(st.stripMs, { pass1: { first: 7, median: 7, max: 7 }, pass2: { first: 11, median: 11, max: 11 } });
+  assert.deepEqual(st.passIo.map((p) => p.ms), [n * 2, n * 2]);
+  assert.equal(st.io.getPixelsMs, 2 * n * 2);
+  assert.equal(st.io.createMs, n * 3);
+  assert.equal(st.io.putPixelsMs, n * 5);
+  // free memory is read before the work and after it
+  assert.deepEqual(st.memory, { before: 7e9, after: 6e9 });
+  // the summary's parts add up to the total, and the probes are named inside «прочее»
+  const p = Diagnostics.applyParts(Object.assign({}, st, { coreStats: { timings: { pass1: 0, blur: 0, pass2: 0 } } }));
+  assert.equal(p.probe, 2000);
+  assert.ok(p.other >= 2000);
+});
+
+test("apply v1.1.2: the median of the strip times is a median, the first strip is the first", () => {
+  assert.deepEqual(Bridge._stripSummary([50, 10, 10, 30, 10]), { first: 50, median: 10, max: 50 });
+  assert.deepEqual(Bridge._stripSummary([1, 2, 3, 4]), { first: 1, median: 3, max: 4 });
+  assert.equal(Bridge._stripSummary([]), null);
+});
+
+for (const [label, expectStages] of [["blur", ["read", "blur"]], ["write", ["read", "blur", "layer", "write"]]]) {
+  test(`apply v1.1.2: a cancel during ${label} keeps the stage time, the strip times and the second probe`, async () => {
+    const cancelAt = await stageMiddle(label);
+    const fake = offsetLayerFake("null", { cancelAtProgress: cancelAt });
+    const { bridge } = clockedBridge(fake, { stripRows: 4 });
+    const plan = (await bridge.inspect({})).plans.layer;
+    let stats = null;
+    await assert.rejects(bridge.apply({ settings: SETTINGS, plan }), (err) => {
+      stats = err.halationStats;
+      return Bridge.isCancelError(err);
+    });
+    assert.ok(stats.cancelled);
+    // (the layer stage makes no timed call under this clock: it is 0, but present)
+    for (const k of expectStages) assert.ok(k === "layer" ? stats.timings[k] === 0 : stats.timings[k] > 0, `stage ${k} has a time after a cancel in ${label}: ${JSON.stringify(stats.timings)}`);
+    assert.ok(stats.stripMs.pass1 && stats.stripMs.pass1.median === 7);
+    if (label === "write") assert.ok(stats.stripMs.pass2 && stats.stripMs.pass2.median === 11);
+    else assert.equal(stats.stripMs.pass2, null);
+    assert.ok(stats.probe.before && stats.probe.after, "both probes");
+    assert.equal(typeof stats.memory.after, "number");
+    // a history line is still readable
+    const d = Diagnostics.create({ pluginVersion: "1.1.2" });
+    d.set("apply", stats);
+    assert.match(d.report(), /\] отменено, всего \d+ мс: проход 1 \d+, размытие с паузами \d+/);
+  });
+}
+
+test("apply v1.1.2: a failing probe or memory call never fails the apply", async () => {
+  const fake = plainFake(40, 30);
+  const bridge = Bridge.createBridge({
+    photoshop: fake.photoshop, color: Color, yieldFn: () => Promise.resolve(), log() {},
+    core: Object.assign({}, core, { speedProbe: () => ({ first: "x" }) }), // toFixed would throw
+    os: { freemem: () => { throw new Error("no"); } },
+  });
+  const res = await bridge.apply({ settings: SETTINGS, plan: (await bridge.inspect({})).plans.layer });
+  assert.ok(res.stats.ok);
+  assert.deepEqual(res.stats.probe, { before: null, after: null });
+  assert.deepEqual(res.stats.memory, { before: null, after: null });
 });

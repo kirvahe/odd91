@@ -186,6 +186,43 @@ function loupeMargin(settings, docLongSide) {
   return Math.max(8, Math.min(1024, Math.ceil(3.5 * widest)));
 }
 
+// Radii of the halo kernel (v1.1.2): r50 holds half of the halo light, r90 holds 90 % of it.
+// Both are fixed multiples of lambda, found once from the kernel's own Gaussians (a 2D Gaussian
+// keeps 1 - exp(-r^2 / (2 sigma^2)) of its light inside radius r), so they follow LOBES/EXP_FIT.
+let radiusFactors = null;
+function haloRadiusFactors() {
+  if (radiusFactors) return radiusFactors;
+  const gs = kernelGaussians({ blurMul: 1, radii: [1, 1, 1] }, 1 / LAMBDA_FRACTION, 1)[0]; // lambda = 1
+  let total = 0;
+  for (const g of gs) total += g.weight;
+  const inside = (r) => {
+    let e = 0;
+    for (const g of gs) e += g.weight * (1 - Math.exp((-r * r) / (2 * g.sigma * g.sigma)));
+    return e / total;
+  };
+  const solve = (share) => {
+    let lo = 0;
+    let hi = 1000;
+    for (let i = 0; i < 100; i++) {
+      const mid = (lo + hi) / 2;
+      if (inside(mid) < share) lo = mid;
+      else hi = mid;
+    }
+    return (lo + hi) / 2;
+  };
+  radiusFactors = { r50: solve(0.5), r90: solve(0.9) };
+  return radiusFactors;
+}
+
+// The halo size in document pixels for these settings on a document with this long side
+// (the red channel's radius factor is not applied: the panel shows the common size).
+function haloRadii(settings, docLongSide) {
+  const s = normalizeSettings(settings);
+  const f = haloRadiusFactors();
+  const lambda = LAMBDA_FRACTION * Math.max(0, Number(docLongSide) || 0) * s.blurMul;
+  return { lambda, r50: f.r50 * lambda, r90: f.r90 * lambda };
+}
+
 // Physics parameters shared by the processor and the preview.
 function physics(settings) {
   const s = normalizeSettings(settings);
@@ -243,6 +280,8 @@ module.exports = {
   STRENGTH_MAX,
   normalizeSettings,
   blurMultiplier,
+  haloRadiusFactors,
+  haloRadii,
   blurFromSlider,
   blurToSlider,
   strengthToA,

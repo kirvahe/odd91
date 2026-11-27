@@ -192,6 +192,9 @@ function createProcessor(opts) {
   }
 
   const timings = { pass1: 0, blur: 0, pass2: 0, fine: 0 };
+  // v1.1.2: 16-column tiles of the fine vertical pass under a threshold (zero-skip): how many
+  // there were and how many had to be computed. Tells how much of the frame carries a fine halo.
+  const fineTiles = { total: 0, computed: 0 };
   const stripRows = Math.max(1, Math.min(h, Math.floor(STRIP_PIXELS / w)));
 
   function pass1(data, comps, y0, rows) {
@@ -260,31 +263,41 @@ function createProcessor(opts) {
       yield 1;
       return;
     }
-    const t0 = Date.now();
+    // v1.1.2 (plan review С2): only the time inside the steps counts. What the caller does
+    // between two steps (progress window, yields) used to be added to this timer.
+    // It is added step by step, so a cancelled or failed blur still reports its time (code review С1).
+    timings.blur = 0;
+    let t0 = Date.now();
     normalizeBlocks(base);
     if (wbase) normalizeBlocks(wbase);
     const parts = wbase ? 2 : 1;
     let gen = H.haloForChannels(base, bw, bh, kern.base);
     let r = gen.next();
+    timings.blur += Date.now() - t0;
     while (!r.done) {
       yield r.value / parts;
+      t0 = Date.now();
       r = gen.next();
+      timings.blur += Date.now() - t0;
     }
     field = r.value;
     base = null;
     if (wbase) {
       // The weight map uses the red channel's kernel (all channels share it unless radii differ).
       const wk = [kern.base[0], kern.base[0], kern.base[0]];
+      t0 = Date.now();
       gen = H.haloForChannels(wbase, bw, bh, wk);
       r = gen.next();
+      timings.blur += Date.now() - t0;
       while (!r.done) {
         yield 0.5 + r.value / 2;
+        t0 = Date.now();
         r = gen.next();
+        timings.blur += Date.now() - t0;
       }
       wfield = r.value;
       wbase = null;
     }
-    timings.blur = Date.now() - t0;
   }
 
   // ---- Full-resolution fine part (v1.1.1: perf plan review 2026-11-26).
@@ -506,8 +519,10 @@ function createProcessor(opts) {
         }
         const ca = (ry + R2 - r) * nT;
         const cb = (ry + R2 + r + 1) * nT;
+        fineTiles.total += nT;
         for (let t = 0; t < nT; t++) {
           if (cnt[cb + t] === cnt[ca + t]) continue;
+          fineTiles.computed++;
           const x0 = t << FINE_TILE_SHIFT;
           const x1 = x0 + FINE_TILE < w ? x0 + FINE_TILE : w;
           vertSegment(hor, out, hc, o0, x0 * NC, x1 * NC, st, taps, r, wt);
@@ -819,6 +834,7 @@ function createProcessor(opts) {
         fine: FINEC.map((f) => ({ delta: f.delta, gaussians: f.gs.map((g) => ({ weight: g.weight, radius: g.radius })) })),
         fineRadius,
         timings: Object.assign({}, timings),
+        fineTiles: SKIP ? Object.assign({}, fineTiles) : null,
         identity,
       };
     },

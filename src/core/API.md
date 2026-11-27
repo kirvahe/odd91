@@ -128,3 +128,12 @@ This runs the same processor in one go.
 - `p.stats.timings.fine`: ms spent on the fine part, a share of `pass2`.
 - `createProcessor` / `processImage` option `_noSkip: true` turns the zero-skip off. It is for tests only.
 - Fine-part buffers live in the processor and are reused by every strip.
+
+## v1.1.2 additions (diagnostics and the blur unit; plan review 2026-11-27)
+
+- No change in arithmetic: the output is bit-identical to v1.1.1 (`test/core-v112.test.js` against the frozen copy in `test/helpers/core-v111`).
+- `haloRadiusFactors()` returns `{ r50, r90 }`: the radii holding 50 % and 90 % of the halo light, in units of lambda (2.5104 and 8.958 for the current kernel). They are derived from the kernel's own Gaussians.
+- `haloRadii(settings, docLongSide)` returns `{ lambda, r50, r90 }` in document pixels. The panel shows them under the blur slider, because the blur is a share of the frame (`LAMBDA_FRACTION`, also exported) and the bare multiplier read as a size in pixels.
+- `speedProbe(nowFn?, repeats = 3)` returns `{ first, min, sum }`: times in ms of a fixed workload and its checksum (372855). The bridge runs it right before pass 1 and right after pass 2. Compare the times only between reports from one machine.
+- `p.stats.timings.blur` now counts only the time inside the blur steps. It used to include whatever the caller did between two steps.
+- `p.stats.fineTiles` is `{ total, computed }` for the zero-skip of the fine pass under a threshold, and `null` without it.

@@ -137,6 +137,7 @@
         <sp-slider id="blur-slider" class="slider" min="0" max="100" step="0.1" value="76.9" show-value="false"></sp-slider>
         <sp-textfield id="blur-field" class="field field-num" value="×1.00"></sp-textfield>
       </div>
+      <sp-detail id="blur-hint" class="hint"></sp-detail>
       <div class="slider-row">
         <sp-label class="slider-label">Сила</sp-label>
         <sp-slider id="strength-slider" class="slider" min="0" max="400" value="30" show-value="false"></sp-slider>
@@ -182,7 +183,7 @@
         <div id="preview-placeholder" class="preview-placeholder">Предпросмотр появится после открытия документа</div>
       </div>
       <sp-detail id="loupe-hint" class="hint">В режиме «Кадр» щёлкните по картинке — там откроется лупа 1:1.</sp-detail>
-      <sp-detail id="preview-progress" class="hint progress is-hidden">Готовлю предпросмотр…</sp-detail>
+      <sp-detail id="preview-progress" class="hint progress">&nbsp;</sp-detail>
       <sp-detail id="preview-source" class="hint"></sp-detail>
       <div class="row">
         <sp-radio-group id="view-group" name="view">
@@ -220,11 +221,14 @@
     <div class="section">
       <sp-action-button id="diag-toggle" quiet>▸ Диагностика</sp-action-button>
       <div id="diag-block" class="subsection is-hidden">
+        <div id="diag-summary" class="diag-summary"></div>
         <div class="row">
           <sp-button id="btn-copy-report" variant="secondary">Скопировать отчёт</sp-button>
+          <sp-action-button id="btn-show-report" quiet>Показать текстом</sp-action-button>
         </div>
         <sp-detail id="copy-message" class="hint is-hidden"></sp-detail>
-        <textarea id="diag-text" class="diag-text" readonly></textarea>
+        <div id="diag-fallback"></div>
+        <div id="diag-view" class="diag-view is-hidden"></div>
       </div>
     </div>
 

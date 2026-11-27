@@ -7,7 +7,7 @@
 (function () {
   "use strict";
 
-  var PLUGIN_VERSION = "1.1.1"; // checked against manifest.json by tools/build-ccx.mjs
+  var PLUGIN_VERSION = "1.1.2"; // checked against manifest.json by tools/build-ccx.mjs
   var PANEL_ID = "halationPanel";
   var PREVIEW_MAX_SIDE = 500;
   // Two-stage preview (src/core/API.md): a half-size draft while something moves,
@@ -119,6 +119,8 @@
     previewStale: true,
     busy: false,
     quietUntil: 0,
+    busyEndedAt: 0,
+    diagViewOpen: false,
     draftTimer: null,
     fullTimer: null,
     lastFullKey: null,
@@ -158,7 +160,10 @@
 
   function setBusy(busy, label) {
     state.busy = busy;
-    if (!busy) state.quietUntil = nowMs() + 800;
+    if (!busy) {
+      state.quietUntil = nowMs() + 800;
+      state.busyEndedAt = nowMs();
+    }
     if (!busy && state.loupe && state.loupe.needsRead && state.ui && state.ui.previewMode === "loupe") {
       // An update skipped while the panel was busy runs now (review М5).
       setTimeout(function () { if (!state.busy) updateLoupe(true, "после занятости"); }, 0);
@@ -241,6 +246,45 @@
     return "×" + (m < 0.1 ? m.toFixed(3) : m.toFixed(2));
   }
 
+  // "4,1 px", "15 px"; below 0.05 px a number would read as zero
+  function fmtPx(v) {
+    if (v < 0.05) return "меньше 0,1 px";
+    return (v < 10 ? v.toFixed(1).replace(".", ",") : String(Math.round(v))) + " px";
+  }
+
+  // v1.1.2 (Ilya): the multiplier had no unit, so it read as a fixed size in pixels. The blur is
+  // a share of the frame: x1 puts half of the halo light within 0.45 % of the document's long side.
+  // The line under the slider says so and gives the size in pixels on the current frame.
+  function blurHintText(s, longSide, stale) {
+    var head = "Размытие " + formatBlur(s.blurMul) + " считается от размера кадра, не в пикселях";
+    if (!(longSide > 0) || typeof core.haloRadii !== "function") {
+      var f = typeof core.haloRadiusFactors === "function" ? core.haloRadiusFactors() : null;
+      var lf = core.LAMBDA_FRACTION;
+      return head +
+        (f && lf ? ": при ×1 половина света ореола лежит в пределах " + (100 * f.r50 * lf).toFixed(2).replace(".", ",") +
+          " % длинной стороны от источника, 90 % — в пределах " + (100 * f.r90 * lf).toFixed(1).replace(".", ",") + " %" : "") +
+        ". На файлах разного размера ореол выглядит одинаково.";
+    }
+    var r = core.haloRadii(s, longSide);
+    // a stale preview may belong to another document: say whose size this is (code review М3)
+    return head + ". " + (stale ? "На кадре последнего предпросмотра" : "На этом кадре") + " (длинная сторона " + Math.round(longSide) +
+      " px) половина света ореола лежит в пределах " + fmtPx(r.r50) + " от источника, 90 % — в пределах " + fmtPx(r.r90) +
+      ". На файле другого размера ореол займёт ту же долю кадра.";
+  }
+
+  function renderBlurHint() {
+    var el = $("blur-hint");
+    if (!el) return;
+    el.textContent = blurHintText(state.settings, state.proxy ? state.proxyDocLongSide : 0, !!state.previewStale);
+  }
+
+  // The line under the preview keeps its place when idle: hiding it would shift everything below
+  // by a line on every read (code review v1.1.2 М8). Idle text is a no-break space.
+  function setProgress(text) {
+    var el = $("preview-progress");
+    if (el) el.textContent = text || " ";
+  }
+
   function parseFieldNumber(text) {
     var t = String(text === undefined || text === null ? "" : text).replace(/[×x%\s]/gi, "").replace(",", ".");
     if (!t) return NaN;
@@ -291,6 +335,7 @@
     var s = state.settings;
     // review v1.1 С5: above 100 % thin dark details next to light ones glow too
     show($("strength-hint"), s.strength > 100);
+    renderBlurHint();
     for (var id in NUMBER_FIELDS) {
       if (Object.prototype.hasOwnProperty.call(NUMBER_FIELDS, id)) setField(id, NUMBER_FIELDS[id].text(s));
     }
@@ -491,6 +536,7 @@
 
   function updateStaleLabel() {
     show($("preview-stale"), !!state.proxy && state.previewStale);
+    renderBlurHint();
     if (state.ui && state.ui.previewMode === "loupe") return; // the loupe writes its own caption
     $("preview-source").textContent = state.proxy ? "Источник: " + state.proxyLabel : "";
   }
@@ -693,14 +739,13 @@
       state.loupe.raw = null;
       state.loupe.needsRead = false;
       updateStaleLabel();
+      renderBlurHint();
       setPreviewPlaceholder(rep.blocking.length ? rep.blocking.join(" ") : rep.nothingMessage);
       return;
     }
     var plan = rep.plans.layer || rep.plans.composite;
-    var progressEl = $("preview-progress");
     var lastPct = -1;
-    progressEl.textContent = "Готовлю предпросмотр…";
-    show(progressEl, true);
+    setProgress("Готовлю предпросмотр…");
     if (!state.proxy) setPreviewPlaceholder("Готовлю предпросмотр…");
     try {
       var res = await state.bridge.buildPreview({
@@ -710,11 +755,12 @@
           var pct = Math.floor(value * 100);
           if (pct === lastPct) return;
           lastPct = pct;
-          progressEl.textContent = "Готовлю предпросмотр… " + pct + " %";
+          setProgress("Готовлю предпросмотр… " + pct + " %");
         }
       });
       state.proxy = res.proxy;
       state.proxyDocLongSide = res.docLongSide;
+      renderBlurHint();
       state.proxyLabel = res.label;
       state.previewStale = false;
       state.lastFullKey = null;
@@ -727,16 +773,16 @@
       state.loupe.raw = null;
       diag.set("preview", res.stats);
       diag.log("Предпросмотр построен (" + reason + "): " + res.stats.proxySize + ", " + Math.round(res.stats.timings.total) + " мс");
-      progressEl.textContent = "Пересчитываю…";
+      setProgress("Пересчитываю…");
       // Let the label paint before the (blocking) full render.
       setTimeout(function () {
-        show(progressEl, false);
+        setProgress("");
         clearPreviewTimers();
         if (state.ui.previewMode === "loupe") updateLoupe(true, reason);
         else renderPreviewNow(false);
       }, 0);
     } catch (e) {
-      show(progressEl, false);
+      setProgress("");
       var d = Bridge.describeError(e);
       if (d.kind === "cancelled") diag.log("Построение предпросмотра отменено");
       else diag.error(e, "buildPreview");
@@ -832,9 +878,7 @@
       return false;
     }
     setBusy(true, "Лупа…");
-    var progressEl = $("preview-progress");
-    progressEl.textContent = "Читаю область для лупы…";
-    show(progressEl, true);
+    setProgress("Читаю область для лупы…");
     try {
       var region = await state.bridge.readRegion({ plan: state.previewPlan, rect: rect });
       state.loupe.raw = region;
@@ -852,7 +896,7 @@
       setPreviewPlaceholder(d.kind === "busy" ? "Photoshop занят — лупа не построена. Нажмите «Обновить», когда он освободится." : d.text);
       return false;
     } finally {
-      show(progressEl, false);
+      setProgress("");
       setBusy(false);
     }
   }
@@ -1216,7 +1260,9 @@
         }
       });
       diag.set("apply", res.stats);
-      var sec = ((nowMs() - t0) / 1000).toFixed(1);
+      // the same number as in the «Диагностика» summary (plan review М8)
+      var totalMs = res.stats && res.stats.timings && res.stats.timings.total >= 0 ? res.stats.timings.total : nowMs() - t0;
+      var sec = (totalMs / 1000).toFixed(1).replace(".", ",");
       diag.log("Применено: " + plan.label + ", " + sec + " с, слой id " + res.resultLayerId);
       var placed = plan.mode !== "layer" ? "поверх всех слоёв."
         : res.stats.placedAbove === "result" ? "над прежним результатом." : "над исходным слоем.";
@@ -1247,10 +1293,13 @@
     }
   }
 
-  function onDocChange(eventName) {
+  function onDocChange(eventName, target) {
     if (state.busy || nowMs() < state.quietUntil) return;
     // The frame cache and the loupe cache stay until «Обновить» (or a new loupe centre).
-    markStale("событие «" + eventName + "»");
+    // v1.1.2 (plan review М6): the journal names what the event was about and how long after
+    // the panel's own work it came, to tell the user's edits from echoes of our apply.
+    markStale("событие «" + eventName + "»" + (target ? " (" + target + ")" : "") +
+      (state.busyEndedAt ? ", через " + Math.round(nowMs() - state.busyEndedAt) + " мс после работы панели" : ""));
     schedulePeek();
     if (state.pendingConfirm) {
       hideConfirm();
@@ -1260,10 +1309,46 @@
 
   // ------------------------------------------------------------------ diagnostics
 
+  function setLines(box, lines) {
+    if (!box) return;
+    box.innerHTML = "";
+    for (var i = 0; i < lines.length; i++) {
+      var div = document.createElement("div");
+      div.className = "diag-line";
+      div.textContent = lines[i];
+      box.appendChild(div);
+    }
+  }
+
+  // Long lines (JSON without spaces) are cut into pieces: a plain <div> in UXP may not wrap them.
+  function wrapForView(text, width) {
+    var out = [];
+    var lines = String(text).split("\n");
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      if (!line) {
+        out.push(" ");
+        continue;
+      }
+      for (var p = 0; p < line.length; p += width) out.push(line.slice(p, p + width));
+    }
+    return out;
+  }
+
   function renderDiag() {
     state.diagTimer = null;
     if (!state.ui || !state.ui.diagOpen) return;
-    $("diag-text").value = diag.report();
+    setLines($("diag-summary"), diag.summary());
+    if (state.diagViewOpen) setLines($("diag-view"), wrapForView(diag.report(), viewWidth()));
+  }
+
+  // Characters per line of the report view: the monospace 10 px font is about 6.2 px per
+  // character. Lines without spaces (settings, core stats) do not wrap by themselves and the
+  // panel clips what sticks out, so they are cut to the block's width (code review v1.1.2 С2).
+  function viewWidth() {
+    var box = $("diag-view");
+    var w = box ? Number(box.clientWidth) : 0;
+    return w > 0 ? Math.max(32, Math.floor((w - 10) / 6.2)) : 44;
   }
 
   function scheduleDiag() {
@@ -1282,10 +1367,39 @@
     }
   }
 
+  function toggleReportView(force) {
+    var open = typeof force === "boolean" ? force : !state.diagViewOpen;
+    state.diagViewOpen = open;
+    show($("diag-view"), open);
+    $("btn-show-report").textContent = open ? "Скрыть текст" : "Показать текстом";
+    if (open) setLines($("diag-view"), wrapForView(diag.report(), viewWidth()));
+  }
+
+  // Copying failed: a text field to select by hand. Created only now, without `readonly` and
+  // with opaque colors (styles.css), so it does not depend on how UXP themes native fields;
+  // the same report is also shown as plain lines, which is readable in any case.
+  function showCopyFallback(text) {
+    toggleReportView(true); // the plain lines first: they are readable whatever happens to the field
+    try {
+      var box = $("diag-fallback");
+      if (!box) return;
+      box.innerHTML = "";
+      var ta = document.createElement("textarea");
+      ta.className = "diag-text";
+      ta.value = text;
+      box.appendChild(ta);
+      ta.value = text; // again once it is in the document, in case UXP drops a value set before that
+      ta.focus();
+      // UXP documents setSelectionRange on a textarea, not select()
+      if (typeof ta.setSelectionRange === "function") ta.setSelectionRange(0, text.length);
+      else if (typeof ta.select === "function") ta.select();
+    } catch (e) {
+      diag.log("Поле для ручного копирования: " + e.message);
+    }
+  }
+
   async function copyReport() {
     var text = diag.report();
-    var ta = $("diag-text");
-    ta.value = text;
     var ok = false;
     var clip = typeof navigator !== "undefined" ? navigator.clipboard : null;
     if (clip && typeof clip.writeText === "function") {
@@ -1306,12 +1420,16 @@
     }
     var msg = $("copy-message");
     if (ok) {
-      msg.textContent = "Отчёт скопирован в буфер обмена.";
+      var box = $("diag-fallback");
+      if (box) box.innerHTML = "";
+      msg.textContent = "Отчёт скопирован в буфер обмена (строк: " + text.split("\n").length + "). Вставьте его в сообщение.";
+      show(msg, true);
     } else {
-      try { ta.focus(); ta.select(); } catch (e) { /* selection unsupported */ }
-      msg.textContent = "Скопировать автоматически не вышло: выделите текст ниже и нажмите Cmd+C (Ctrl+C).";
+      // message first, then the views: a failure in them must not hide the explanation
+      msg.textContent = "Скопировать автоматически не вышло. Отчёт показан ниже: выделите текст в поле и нажмите Ctrl+C (Cmd+C), либо пришлите снимок экрана.";
+      show(msg, true);
+      showCopyFallback(diag.report()); // rebuilt: it now carries the clipboard error from the journal
     }
-    show(msg, true);
   }
 
   function refreshHostInfo() {
@@ -1459,6 +1577,7 @@
 
     $("diag-toggle").addEventListener("click", function () { toggleDiag(); });
     $("btn-copy-report").addEventListener("click", copyReport);
+    $("btn-show-report").addEventListener("click", function () { toggleReportView(); });
 
     // Width changes under RESIZE_MIN_DELTA px are ignored: tiny layout jitter must not
     // resize (and clear) the curve canvas (v1.1 flicker fix).

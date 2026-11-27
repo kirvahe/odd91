@@ -48,10 +48,6 @@ body {
   padding: 8px 10px 16px 10px;
 }
 
-.is-hidden {
-  display: none;
-}
-
 .section {
   margin-top: 10px;
   padding-top: 8px;
@@ -312,15 +308,42 @@ body {
 }
 
 /* diagnostics */
+/* v1.1.2: the report is no longer shown in an always-visible <textarea> (in Photoshop 24.7 on
+   Windows it stayed white with no visible text). The panel shows a short summary in plain text;
+   the full report opens as plain lines on request. A <textarea> appears only when copying to the
+   clipboard failed, with opaque colors that do not depend on how UXP themes native fields. */
+.diag-summary {
+  margin-bottom: 6px;
+}
+
+.diag-line {
+  display: block;
+  color: var(--hal-text);
+  font-size: var(--hal-font-small);
+  margin-top: 2px;
+}
+
+.diag-view {
+  margin-top: 6px;
+  padding: 4px;
+  border: 1px solid var(--hal-border);
+}
+
+.diag-view .diag-line {
+  font-family: Menlo, Consolas, monospace;
+  font-size: 10px;
+  margin-top: 0;
+}
+
 .diag-text {
   width: 100%;
-  height: 220px;
+  height: 160px;
   margin-top: 6px;
   font-family: Menlo, Consolas, monospace;
   font-size: 10px;
-  color: var(--hal-text);
-  background-color: var(--hal-panel);
-  border: 1px solid var(--hal-border);
+  color: #000000;
+  background-color: #ffffff;
+  border: 1px solid #808080;
 }
 
 /* v1.1 */
@@ -353,4 +376,30 @@ body {
 
 .preview-img {
   cursor: crosshair;
+}
+
+/* Hiding. These two rules MUST stay the last ones of the file (test/build.test.js checks it).
+   v1.1.2, plan review С1: `.is-hidden` used to sit near the top, and the later rules
+   `.hint { display: block }`, `.row { display: flex }` and `.preview-img { display: block }`
+   have the same specificity, so they won: seven elements were never hidden (the strength hint,
+   the «только ореол» caption, «Читаю область для лупы…», the copy message, two preset rows,
+   the preview image).
+   Two rules, not one (code review М9): a selector list is dropped as a whole if a parser rejects
+   one selector, and then nothing would hide. The compound selectors only raise the specificity,
+   in case a rule with `display` is ever added below; the plain rule after them does the work. */
+.hint.is-hidden,
+.row.is-hidden,
+.preview-img.is-hidden,
+.message.is-hidden,
+.subsection.is-hidden,
+.confirm.is-hidden,
+.section.is-hidden,
+.stale.is-hidden,
+.loupe-frame.is-hidden,
+.diag-view.is-hidden {
+  display: none;
+}
+
+.is-hidden {
+  display: none;
 }

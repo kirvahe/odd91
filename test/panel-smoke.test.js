@@ -168,10 +168,16 @@ test("panel: show builds the preview, sliders render draft then full, apply runs
 
   panels.halationPanel.show();
   const state = ctx.HalationPanel.state;
+  // v1.1.2: before a document is read the blur line explains the unit without pixel numbers
+  assert.equal(dom["blur-hint"].textContent, "Размытие ×1.00 считается от размера кадра, не в пикселях: при ×1 половина света ореола лежит в пределах 0,45 % длинной стороны от источника, 90 % — в пределах 1,6 %. На файлах разного размера ореол выглядит одинаково.");
   await waitFor(() => state.proxy && dom["preview-img"].src, "preview after show");
+  // with a document: the size in pixels on this frame (60 px long side, ×1: r50 = 0.27 px, r90 = 0.97 px)
+  assert.equal(dom["blur-hint"].textContent, "Размытие ×1.00 считается от размера кадра, не в пикселях. На этом кадре (длинная сторона 60 px) половина света ореола лежит в пределах 0,3 px от источника, 90 % — в пределах 1,0 px. На файле другого размера ореол займёт ту же долю кадра.");
   assert.equal(fake.log.modal[0].commandName, "Halation: предпросмотр");
   assert.ok(dom["preview-img"].classList.contains("is-hidden") === false);
-  assert.ok(dom["preview-progress"].classList.contains("is-hidden"));
+  // v1.1.2: the progress line keeps its place and is blank when idle (no jump of the layout)
+  assert.ok(!dom["preview-progress"].classList.contains("is-hidden"));
+  assert.equal(dom["preview-progress"].textContent, "\u00a0");
   assert.equal(ctx.document.body.className, "theme-light");
   const fullW = blobs.at(-1).width;
   assert.equal(fullW, state.proxy.width);
@@ -197,6 +203,10 @@ test("panel: show builds the preview, sliders render draft then full, apply runs
   fake.fire("select", { _target: [{ _ref: "layer", _id: 1 }] });
   assert.ok(!dom["preview-stale"].classList.contains("is-hidden"));
   assert.equal(fake.log.modal.length, modalsBefore);
+  // v1.1.2: the journal says what the event was about and how long after the panel's own work it came
+  assert.match(ctx.HalationPanel.diag.entries.at(-1), /Предпросмотр устарел: событие «select» \(layer#1\), через \d+ мс после работы панели$/);
+  // and the blur line no longer claims the size is this frame's: the preview may belong to another document
+  assert.match(dom["blur-hint"].textContent, /\. На кадре последнего предпросмотра \(длинная сторона 60 px\) /);
 
   // 8-bit -> scene-linear mode shows the limit slider; the slider maps to reinhardLimit
   dom["mode-group"].children.forEach((r, i) => { r.checked = i === 2; });
@@ -255,9 +265,62 @@ test("panel: show builds the preview, sliders render draft then full, apply runs
   // diagnostics report
   dom["btn-copy-report"].dispatch("click");
   await waitFor(() => clipboard.length === 1, "clipboard write");
-  for (const part of ["Halation — отчёт диагностики", "Photoshop: 27.1.0", "uxp-8.1.0", "60×40", "getPixels:", "Последнее применение: успешно"]) {
+  for (const part of ["Halation — отчёт диагностики", "Photoshop: 27.1.0", "uxp-8.1.0", "60×40", "getPixels:", "Последнее применение: успешно",
+    "По исполнителю: Photoshop — чтение", "Эталон скорости", "Расчёт по полосам", "История применений"]) {
     assert.ok(clipboard[0].includes(part), "report misses " + part);
   }
+  await waitFor(() => dom["copy-message"].textContent, "copy message");
+  assert.equal(dom["copy-message"].textContent, "Отчёт скопирован в буфер обмена (строк: " + clipboard[0].split("\n").length + "). Вставьте его в сообщение.");
+  assert.ok(!dom["copy-message"].classList.contains("is-hidden"));
+  assert.equal(dom["diag-fallback"].children.length, 0, "no text field when copying worked");
+
+  // v1.1.2: «Диагностика» shows a plain-text summary of the last apply instead of a text field
+  assert.equal(dom["diag-text"], undefined, "the always-visible report field is gone");
+  dom["diag-toggle"].dispatch("click");
+  const sum = dom["diag-summary"].children.map((c) => c.textContent);
+  assert.equal(sum.length, 4);
+  assert.match(sum[0], /^Последнее применение: \d+,\d с$/);
+  assert.match(sum[1], /^Photoshop: чтение \d+,\d с · запись \d+,\d с · слой \d+,\d с$/);
+  assert.match(sum[2], /^Расчёт плагина: /);
+  assert.ok(sum.every((t, i) => dom["diag-summary"].children[i].className === "diag-line"));
+  // the status line and the summary quote the same total
+  const total = ctx.HalationPanel.diag.info.apply.timings.total;
+  assert.ok(dom.status.textContent.includes("Готово за " + (total / 1000).toFixed(1).replace(".", ",") + " с"), dom.status.textContent);
+  assert.equal(sum[0], "Последнее применение: " + (total / 1000).toFixed(1).replace(".", ",") + " с");
+
+  // the full report as plain lines on request, long lines cut into pieces
+  assert.ok(dom["diag-view"].classList.contains("is-hidden"));
+  dom["btn-show-report"].dispatch("click");
+  assert.ok(!dom["diag-view"].classList.contains("is-hidden"));
+  assert.equal(dom["btn-show-report"].textContent, "Скрыть текст");
+  const viewLines = dom["diag-view"].children.map((c) => c.textContent);
+  assert.equal(viewLines[0], "Halation — отчёт диагностики");
+  // cut to the block's width (280 px in the fake DOM: 43 characters), not to a fixed 96 (code review С2)
+  assert.ok(viewLines.length > 40 && viewLines.every((l) => l.length <= 43), "longest " + Math.max(...viewLines.map((l) => l.length)));
+  // the open view follows the journal
+  ctx.HalationPanel.diag.log("строка журнала для вида");
+  await waitFor(() => dom["diag-view"].children.some((c) => c.textContent.includes("строка журнала для вида")), "view refresh");
+  const whole = (text) => text.split("\n").map((l) => l || " ").join("").replace(/Время: \S+/, "Время: T");
+  assert.equal(dom["diag-view"].children.map((c) => c.textContent).join("").replace(/Время: \S+/, "Время: T"), whole(ctx.HalationPanel.diag.report()), "nothing lost by the wrapping");
+  dom["btn-show-report"].dispatch("click");
+  assert.ok(dom["diag-view"].classList.contains("is-hidden"));
+
+  // copying failed: the report appears as plain lines and in a field created at that moment
+  ctx.navigator.clipboard.writeText = async () => { throw new Error("denied"); };
+  dom["btn-copy-report"].dispatch("click");
+  await waitFor(() => dom["diag-fallback"].children.length === 1, "fallback field");
+  const ta = dom["diag-fallback"].children[0];
+  assert.equal(ta.tagName, "TEXTAREA");
+  assert.equal(ta.className, "diag-text");
+  assert.ok(!ta.hasAttribute("readonly"));
+  assert.ok(ta.value.startsWith("Halation — отчёт диагностики") && ta.value.includes("clipboard.writeText: denied"));
+  assert.ok(!dom["diag-view"].classList.contains("is-hidden"), "plain lines shown as well");
+  await waitFor(() => /не вышло/.test(dom["copy-message"].textContent), "failure message");
+  // and a later successful copy removes the field again
+  ctx.navigator.clipboard.writeText = async (t) => clipboard.push(t);
+  dom["btn-copy-report"].dispatch("click");
+  await waitFor(() => clipboard.length === 2 && /скопирован/.test(dom["copy-message"].textContent), "second clipboard write");
+  assert.equal(dom["diag-fallback"].children.length, 0);
 });
 
 function pickRadio(group, value) {

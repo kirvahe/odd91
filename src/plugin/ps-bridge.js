@@ -260,6 +260,19 @@
     return false; // tool selection and the like
   }
 
+  // What a notification is about, for the journal: "layer#12, document#59" (ids only, no names).
+  function eventTarget(desc) {
+    var t = desc && desc._target;
+    var refs = Array.isArray(t) ? t : t ? [t] : [];
+    var out = [];
+    for (var i = 0; i < refs.length && i < 4; i++) {
+      var r = refs[i];
+      if (!r || typeof r._ref !== "string") continue;
+      out.push(r._ref + (r._id !== undefined ? "#" + r._id : r._enum !== undefined ? ":" + r._value : r._property !== undefined ? "." + r._property : ""));
+    }
+    return out.join(", ");
+  }
+
   function safe(fn) {
     try {
       return fn();
@@ -292,6 +305,18 @@
     if (err && typeof err === "object") {
       try { err[name] = value; } catch (e) { /* frozen error object */ }
     }
+  }
+
+  // first / median / max of the per-strip core times: a cold start shows as a slow first
+  // strip, a slow machine as a slow median (plan review 2026-11-27 С3)
+  function stripSummary(list) {
+    if (!list || !list.length) return null;
+    var sorted = list.slice().sort(function (a, b) { return a - b; });
+    return {
+      first: Math.round(list[0]),
+      median: Math.round(sorted[sorted.length >> 1]),
+      max: Math.round(sorted[sorted.length - 1])
+    };
   }
 
   // ---------------------------------------------------------------- bridge
@@ -946,9 +971,31 @@
         strips: 0,
         stripRows: 0,
         // v1.1.1: time inside Photoshop's imaging calls and in the yields between steps
-        io: { getPixelsMs: 0, getDataMs: 0, putPixelsMs: 0 },
-        yields: { count: 0, ms: 0 }
+        io: { getPixelsMs: 0, getDataMs: 0, putPixelsMs: 0, createMs: 0 },
+        yields: { count: 0, ms: 0 },
+        // v1.1.2: reads split by pass (the apply reads every strip twice), so the report can say
+        // what the «расчёт и запись» stage is made of
+        passIo: [{ ms: 0, bytes: 0 }, { ms: 0, bytes: 0 }]
       };
+    }
+
+    function passIo(stats, o) {
+      return o && (o.pass === 1 || o.pass === 2) && stats.passIo ? stats.passIo[o.pass - 1] : null;
+    }
+
+    // Never throws: diagnostics must not be able to fail an apply (code review v1.1.2 М6).
+    function runProbe() {
+      if (typeof core.speedProbe !== "function") return null;
+      return safe(function () {
+        var t = now();
+        var r = core.speedProbe(now);
+        return { first: +r.first.toFixed(1), min: +r.min.toFixed(1), sum: r.sum, ms: +(now() - t).toFixed(1) };
+      }) || null;
+    }
+
+    function freeMemory() {
+      var f = osMod && typeof osMod.freemem === "function" ? safe(function () { return osMod.freemem(); }) : undefined;
+      return typeof f === "number" && isFinite(f) ? f : null;
     }
 
     // Reads full-width strips of the work area (doc §5.5).
@@ -967,12 +1014,15 @@
         var opts = { documentID: docId, sourceBounds: req, componentSize: 8, applyAlpha: false };
         if (plan.mode === "layer") opts.layerID = plan.sourceLayerId;
         var res = null, imageData = null;
+        var pio = passIo(stats, o);
         try {
           try {
             stats.getPixelsCalls++;
             var tg = now();
             res = await imaging.getPixels(opts);
-            stats.io.getPixelsMs += now() - tg;
+            var dg = now() - tg;
+            stats.io.getPixelsMs += dg;
+            if (pio) pio.ms += dg;
           } catch (err) {
             if ((ctx && ctx.isCancelled) || isCancelError(err) || isModalBusyError(err)) throw err;
             if (!o || !o.tolerate) throw err;
@@ -1006,9 +1056,15 @@
           }
           var td = now();
           var raw = await imageData.getData({ chunky: true });
-          stats.io.getDataMs += now() - td;
+          var dd = now() - td;
+          stats.io.getDataMs += dd;
           var len = raw ? raw.length : 0;
-          stats.bytesRead += raw && raw.byteLength !== undefined ? raw.byteLength : len;
+          var nbytes = raw && raw.byteLength !== undefined ? raw.byteLength : len;
+          stats.bytesRead += nbytes;
+          if (pio) {
+            pio.ms += dd;
+            pio.bytes += nbytes;
+          }
           var comps = num(imageData.components);
           if (!(comps > 0)) comps = len / (rectW(ib) * rectH(ib));
           if (len !== rectW(ib) * rectH(ib) * comps) {
@@ -1051,6 +1107,7 @@
       }
       var img = null;
       try {
+        var tc = now();
         img = await imaging.createImageDataFromBuffer(buf, {
           width: w,
           height: h,
@@ -1059,6 +1116,7 @@
           colorSpace: meta.colorSpace || "RGB",
           colorProfile: meta.colorProfile || ""
         });
+        stats.io.createMs += now() - tc;
         stats.putPixelsCalls++;
         var tp = now();
         await imaging.putPixels({
@@ -1381,6 +1439,14 @@
       if (!plan) throw new Error("Нет плана применения");
       var settings = core.normalizeSettings(args.settings || {});
       var stats = newStats("apply", plan);
+      // per-strip core times and the running stage live outside the modal scope: the error
+      // path needs them too
+      var stripMs1 = [], stripMs2 = [], stage = null, stageT = 0;
+      function closeDiagnostics() {
+        if (!stats.stripMs) stats.stripMs = { pass1: stripSummary(stripMs1), pass2: stripSummary(stripMs2) };
+        if (stats.probe && !stats.probe.after) stats.probe.after = runProbe();
+        if (stats.memory && stats.memory.after === null) stats.memory.after = freeMemory();
+      }
       if (args.preflightMs !== undefined) stats.timings.preflight = args.preflightMs;
       var pool = new ScratchPool();
       var t0 = now();
@@ -1448,8 +1514,15 @@
             var had = new Array(nStrips);
             var i, y0, h;
 
+            // v1.1.2: the state of the machine right before the work (speed probe, free memory)
+            stats.probe = { before: runProbe(), after: null };
+            stats.memory = { before: freeMemory(), after: null };
+            var ts;
+
             // Pass 1: read strips, linearize and accumulate into the base grid.
             var t = now();
+            stage = "read";
+            stageT = t;
             stats.toleratedStrips = 0;
             for (i = 0; i < nStrips; i++) {
               y0 = i * rows;
@@ -1457,7 +1530,9 @@
               var s1 = await reader.read(y0, h, { pass: 1, tolerate: mayBeEmpty(i) });
               had[i] = stripHasPixels(s1, 0, h);
               if (s1.tolerated) stats.toleratedStrips++;
+              ts = now();
               proc.pass1(s1.data, s1.components, y0, h);
+              stripMs1.push(now() - ts);
               report(WT.read * (i + 1) / nStrips, "чтение");
               await checkpoint(ctx, stats);
             }
@@ -1470,6 +1545,8 @@
 
             // Blur on the pyramid, yielding between steps.
             t = now();
+            stage = "blur";
+            stageT = t;
             for (var prog of proc.blurSteps()) {
               report(WT.read + WT.blur * clamp01(prog), "размытие");
               await checkpoint(ctx, stats);
@@ -1478,6 +1555,8 @@
 
             // New layer above the source or its topmost earlier result (top for the composite).
             t = now();
+            stage = "layer";
+            stageT = t;
             var made = await createResultLayer(doc, plan, resultLayerName(settings));
             resultId = made.layer.id;
             stats.layerName = layerName(made.layer);
@@ -1492,6 +1571,8 @@
             var fr = Math.max(0, Math.floor(num(safe(function () { return proc.fineRadius; })) || 0));
             stats.fineRadius = fr;
             t = now();
+            stage = "write";
+            stageT = t;
             for (i = 0; i < nStrips; i++) {
               y0 = i * rows;
               h = Math.min(rows, H - y0);
@@ -1508,13 +1589,17 @@
               var stripHas = stripHasPixels(s2, sy, h);
               if (stripHas !== had[i]) throw stripMismatch(area.top + y0, had[i]);
               var out = pool.get("out", h * W * s2.components);
+              ts = now();
               if (fr > 0) proc.pass2(s2.data, s2.components, y0, h, out, { dataY0: dY0, dataRows: dRows });
               else proc.pass2(s2.data, s2.components, y0, h, out);
+              stripMs2.push(now() - ts);
               if (stripHas) await writeStrip(doc.id, resultId, out, W, stripPart(s2, sy, h, W), area, y0, reader.meta, stats, pool);
               report(WT.read + WT.blur + WT.write * (i + 1) / nStrips, "обработка и запись");
               await checkpoint(ctx, stats);
             }
             stats.timings.write = now() - t;
+            stage = null;
+            closeDiagnostics();
 
             // Only inside the selection: the selection becomes the result's layer mask,
             // in the same history step (v1.1).
@@ -1543,6 +1628,10 @@
         // Outside the modal scope: Photoshop has already rolled the document back.
         var e = classifyError(err, outcome);
         stats.timings.total = now() - t0;
+        // code review v1.1.2 С1: a cancelled or failed apply keeps the time of the stage it stopped
+        // in, the per-strip times and the second probe — slow applies are the ones that get cancelled
+        if (stage && stats.timings[stage] === undefined) stats.timings[stage] = now() - stageT;
+        closeDiagnostics();
         stats.cancelled = isCancelError(e);
         stats.error = errorText(e);
         stats.coreStats = procStats(proc);
@@ -1682,7 +1771,7 @@
     function watchChanges(cb) {
       if (!action || typeof action.addNotificationListener !== "function") return function () {};
       var handler = function (eventName, descriptor) {
-        if (isRelevantEvent(eventName, descriptor)) cb(eventName);
+        if (isRelevantEvent(eventName, descriptor)) cb(eventName, eventTarget(descriptor));
       };
       var p = safe(function () { return action.addNotificationListener(WATCH_EVENTS, handler); });
       if (p && typeof p.catch === "function") p.catch(function (e) { log("addNotificationListener: " + errorText(e)); });
@@ -1723,6 +1812,7 @@
     ScratchPool: ScratchPool,
     SRGB_PROFILE: SRGB_PROFILE,
     WEIGHTS: WEIGHTS,
-    stageWeights: stageWeights
+    stageWeights: stageWeights,
+    _stripSummary: stripSummary
   };
 });
